@@ -7,3 +7,7 @@ mod platform;
 pub fn run() {
     app::run();
 }
+
+pub fn run_control_adapter() -> Result<bool, String> {
+    features::agent_api::run_adapter()
+}

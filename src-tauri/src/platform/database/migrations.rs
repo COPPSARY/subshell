@@ -85,7 +85,7 @@ mod tests {
                 .iter()
                 .map(|migration| migration.version)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
     }
 
@@ -115,7 +115,38 @@ mod tests {
             connection
                 .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            2
+            9
+        );
+    }
+
+    #[test]
+    fn upgrades_detected_profiles_to_interactive_arguments() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let migrations = embedded().unwrap();
+        apply(&mut connection, &migrations[..3]).unwrap();
+        for (id, name, arguments) in [
+            ("claude", "Claude Code", r#"["-p","{prompt}"]"#),
+            ("codex", "Codex", r#"["exec","{prompt}"]"#),
+            ("gemini", "Gemini CLI", r#"["-p","{prompt}"]"#),
+        ] {
+            connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES(?1,'generic',?2,?3,'active','now','now')", rusqlite::params![id,name,format!("/tmp/{id}")]).unwrap();
+            connection.execute("INSERT INTO generic_provider_profiles(provider_account_id,executable_path,arguments_json,prompt_mode,inherit_user_home) VALUES(?1,?2,?3,'argument',1)", rusqlite::params![id,format!("/usr/bin/{id}"),arguments]).unwrap();
+        }
+
+        apply(&mut connection, &migrations).unwrap();
+
+        let arguments = |id: &str| {
+            connection.query_row::<String, _, _>("SELECT arguments_json FROM generic_provider_profiles WHERE provider_account_id=?1", [id], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(arguments("codex"), r#"["{prompt}"]"#);
+        assert_eq!(arguments("gemini"), r#"["-i","{prompt}"]"#);
+        assert_eq!(
+            arguments("claude"),
+            r#"["--session-id","{sessionId}","{prompt}"]"#
+        );
+        assert_eq!(
+            connection.query_row::<String, _, _>("SELECT resume_arguments_json FROM generic_provider_profiles WHERE provider_account_id='codex'", [], |row| row.get(0)).unwrap(),
+            r#"["resume","--last"]"#
         );
     }
 
@@ -125,7 +156,7 @@ mod tests {
         let mut broken = embedded().unwrap();
         apply(&mut connection, &broken).unwrap();
         broken.push(Migration {
-            version: 3,
+            version: 10,
             sql: "CREATE TABLE partial (id TEXT); THIS IS NOT SQL;",
         });
 
@@ -134,7 +165,7 @@ mod tests {
             connection
                 .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            2
+            9
         );
         assert_eq!(
             connection
@@ -151,15 +182,15 @@ mod tests {
     #[test]
     fn rejects_a_database_newer_than_the_embedded_schema() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection.pragma_update(None, "user_version", 10).unwrap();
 
         let error = apply(&mut connection, &embedded().unwrap()).unwrap_err();
 
         assert!(matches!(
             error,
             DatabaseError::NewerSchema {
-                found: 3,
-                supported: 2
+                found: 10,
+                supported: 9
             }
         ));
     }

@@ -4,10 +4,11 @@ use tauri::Manager;
 
 use crate::{
     features::{
+        agent_api, attention,
         context::{self, ContextDrafts},
-        health, projects, providers,
+        context_sharing, health, projects, providers, review,
         runs::{self, RunService},
-        tasks,
+        tasks, timeline,
     },
     platform::{
         database::Database,
@@ -28,18 +29,23 @@ pub fn run() {
             let drafts = ContextDrafts::default();
             let processes = ProcessSupervisor::default();
             let ports = PortLeases::default();
-            app.manage(RunService::new(
+            let run_service = RunService::new(
                 database.clone(),
                 paths.clone(),
                 git.clone(),
                 drafts.clone(),
-                processes,
+                processes.clone(),
                 ports,
-            ));
+            );
+            run_service
+                .recover_and_dispatch()
+                .map_err(|error| std::io::Error::other(error.message))?;
+            app.manage(run_service);
             app.manage(database);
             app.manage(paths);
             app.manage(git);
             app.manage(drafts);
+            app.manage(processes);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,22 +54,49 @@ pub fn run() {
             projects::projects_list,
             projects::projects_restore,
             projects::projects_status,
+            projects::projects_files,
             providers::providers_create_generic,
             providers::providers_update_generic,
             providers::providers_remove,
             providers::providers_list,
+            providers::providers_detect,
+            review::review_get,
+            review::review_approve,
+            review::review_send_back,
+            review::review_merge,
             tasks::tasks_create,
             tasks::tasks_list,
+            tasks::tasks_list_archived,
             tasks::tasks_get,
+            tasks::tasks_update_status,
             context::context_sources,
             context::context_preview,
+            context_sharing::context_share_preview,
+            context_sharing::context_share_deliver,
             runs::runs_environment_preview,
             runs::runs_start,
+            runs::runs_enqueue,
             runs::runs_list,
+            runs::runs_plan_get,
+            runs::runs_plan_approve,
+            runs::runs_plan_reject,
             runs::runs_read_output,
             runs::runs_write_input,
             runs::runs_resize,
             runs::runs_stop,
+            runs::runs_mark_complete,
+            runs::runs_resume,
+            runs::runs_diff,
+            timeline::timeline_list,
+            attention::attention_list,
+            attention::attention_acknowledge,
+            attention::attention_claim_notification,
+            agent_api::workspace_snapshot,
+            agent_api::workspace_request_action,
+            agent_api::workspace_report_activity,
+            agent_api::workspace_submit_plan,
+            agent_api::workspace_decide_action,
+            agent_api::workspace_list_approvals,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SubShell");

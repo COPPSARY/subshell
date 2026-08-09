@@ -23,10 +23,23 @@ pub struct Project {
     pub git: GitStatus,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFiles {
+    pub items: Vec<String>,
+    pub total: usize,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectPath {
     pub path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectId {
+    pub project_id: String,
 }
 
 #[tauri::command]
@@ -60,6 +73,23 @@ pub fn projects_status(
     git: State<GitService>,
 ) -> Result<GitStatus, CommandError> {
     git.status(Path::new(&input.path))
+}
+
+#[tauri::command]
+pub fn projects_files(
+    input: ProjectId,
+    database: State<Database>,
+    git: State<GitService>,
+) -> Result<ProjectFiles, CommandError> {
+    let path: String = database.connect()?.query_row(
+        "SELECT path FROM projects WHERE id=?1",
+        [&input.project_id],
+        |row| row.get(0),
+    )?;
+    let mut items = git.files(Path::new(&path))?;
+    let total = items.len();
+    items.truncate(5_000);
+    Ok(ProjectFiles { items, total })
 }
 
 pub(crate) fn open(

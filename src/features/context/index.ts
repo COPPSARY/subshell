@@ -1,2 +1,2 @@
-export { listContextSources, previewContext } from "./api";
-export type { ContextPreview } from "./model";
+export { deliverContextShare, listContextSources, previewContext, previewContextShare } from "./api";
+export type { ContextPreview, ContextShare, SharePreview } from "./model";
