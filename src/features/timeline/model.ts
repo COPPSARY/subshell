@@ -1,0 +1,1 @@
+export type TimelineEvent = { id: string; projectId: string; taskId: string | null; runId: string | null; providerId: string | null; sequence: number; eventType: string; payload: Record<string, unknown> | null; createdAt: string };

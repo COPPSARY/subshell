@@ -1,3 +1,4 @@
 export { ProvidersView } from "./ProvidersView";
-export { listProviders } from "./api";
-export type { GenericProfile } from "./model";
+export { ProviderIcon } from "./ProviderIcon";
+export { createProvider, detectProviders, listProviders } from "./api";
+export type { DetectedProvider, GenericProfile } from "./model";

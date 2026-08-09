@@ -1,14 +1,16 @@
-import { Bot, FolderGit2, ListTodo, ScrollText } from "lucide-react";
+import { Bot, FolderGit2, ListTodo, PlugZap, ScrollText } from "lucide-react";
 import { ProjectsView } from "../features/projects";
 import { ProvidersView } from "../features/providers";
+import { AgentsView } from "../features/runs";
 import { TasksView } from "../features/tasks";
 import { TimelineView } from "../features/timeline";
 
 export const destinations = [
   { name: "Projects", icon: FolderGit2, view: ProjectsView },
-  { name: "Timeline", icon: ScrollText, view: TimelineView },
+  { name: "Activity", icon: ScrollText, view: TimelineView },
   { name: "Tasks", icon: ListTodo, view: TasksView },
-  { name: "Providers", icon: Bot, view: ProvidersView },
+  { name: "Agents", icon: Bot, view: AgentsView },
+  { name: "Providers", icon: PlugZap, view: ProvidersView },
 ] as const;
 
 export type DestinationName = (typeof destinations)[number]["name"];

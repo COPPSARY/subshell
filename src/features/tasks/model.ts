@@ -1,1 +1,1 @@
-export type Task = { id: string; projectId: string; title: string; description: string; status: string; baseBranch: string; baseRevision: string; acceptanceCriteria: string[]; allowedPaths: string[]; validationCommands: string[]; decisions: string[]; updatedAt: string };
+export type Task = { id: string; projectId: string; title: string; description: string; status: string; queuePosition?: number | null; baseBranch: string; baseRevision: string; acceptanceCriteria: string[]; allowedPaths: string[]; validationCommands: string[]; decisions: string[]; updatedAt: string };

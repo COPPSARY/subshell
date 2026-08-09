@@ -64,13 +64,20 @@ mod tests {
     const EXPECTED_TABLES: &[&str] = &[
         "agent_runs",
         "app_settings",
+        "approval_requests",
+        "attention_acknowledgements",
         "conflict_flags",
         "context_shares",
         "generic_provider_profiles",
+        "merge_attempts",
+        "notification_deliveries",
         "projects",
         "provider_accounts",
         "review_attempts",
         "review_records",
+        "run_branches",
+        "task_plan_assignments",
+        "task_plans",
         "tasks",
         "timeline_events",
         "worktrees",
@@ -141,7 +148,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(database.schema_version().unwrap(), 2);
+        assert_eq!(database.schema_version().unwrap(), 9);
     }
 
     #[test]

@@ -1,1 +1,2 @@
-export type GenericProfile = { id: string; displayName: string; executablePath: string; arguments: string[]; promptMode: "argument" | "stdin"; configRootEnvVar: string | null; configSourcePath: string | null };
+export type GenericProfile = { id: string; displayName: string; executablePath: string; arguments: string[]; resumeArguments?: string[]; promptMode: "argument" | "stdin"; configRootEnvVar: string | null; configSourcePath: string | null; inheritUserHome: boolean };
+export type DetectedProvider = { key: string; displayName: string; executablePath: string; arguments: string[]; resumeArguments: string[]; promptMode: "argument" | "stdin"; isConfigured: boolean };

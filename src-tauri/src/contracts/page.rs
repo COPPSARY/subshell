@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+// generic pagination DTO
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page<T> {

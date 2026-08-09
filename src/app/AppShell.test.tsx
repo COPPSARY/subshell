@@ -10,18 +10,19 @@ const mockedHealth = vi.mocked(getHealth);
 describe("AppShell", () => {
   beforeEach(() => {
     mockedHealth.mockReset();
-    mockedHealth.mockResolvedValue({ status: "ok", schemaVersion: 2 });
+    mockedHealth.mockResolvedValue({ status: "ok", schemaVersion: 4 });
   });
 
   it("navigates all independently owned feature views", async () => {
     render(<AppShell />);
-    expect(await screen.findByText("Schema 2 · Ready")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Open your first project" })).toBeTruthy();
 
     const destinations = [
-      ["Projects", "No repositories yet"],
-      ["Timeline", "No activity yet"],
+      ["Projects", "Open your first project"],
+      ["Activity", "No activity yet"],
       ["Tasks", "No tasks yet"],
-      ["Providers", "Generic CLI profiles"],
+      ["Agents", "Agents"],
+      ["Providers", "AI agents"],
     ];
 
     for (const [button, heading] of destinations) {
@@ -32,11 +33,11 @@ describe("AppShell", () => {
     }
   });
 
-  it("shows an accessible connection status without advertising unfinished controls", () => {
+  it("keeps successful backend health internal", () => {
     mockedHealth.mockReturnValueOnce(new Promise(() => undefined));
     render(<AppShell />);
 
-    expect(screen.getByRole("status").textContent).toContain("Connecting to backend");
+    expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByText("Quick open")).toBeNull();
   });
 

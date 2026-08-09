@@ -1,0 +1,13 @@
+import { Check, GitPullRequest, X } from "lucide-react";
+import { useState } from "react";
+import type { TaskPlan } from "./model";
+
+export function TaskPlanPanel({ busy, onApprove, onReject, plan }: { busy: boolean; onApprove: (fullAccess: boolean) => void; onReject: () => void; plan: TaskPlan }) {
+  const [fullAccess, setFullAccess] = useState(false);
+  return <section aria-label="Plan ready for approval" className="border-y border-waiting/40 bg-[#17150f] px-4 py-4">
+    <div className="flex items-start gap-3"><GitPullRequest aria-hidden="true" className="mt-0.5 shrink-0 text-waiting" size={16} /><div className="min-w-0 flex-1"><h2 className="text-sm font-medium text-primary">Plan ready for approval</h2><p className="mt-1 text-xs leading-5 text-secondary">{plan.summary || `${plan.assignments.length} assignments are ready to start.`}</p></div><span className="status-pill shrink-0">{plan.assignments.length} assignments</span></div>
+    <ol className="mt-3 divide-y divide-line border-y border-line">{plan.assignments.map((assignment) => <li className="py-2.5" key={assignment.id}><div className="flex items-center gap-2"><strong className="text-xs font-medium text-primary">{assignment.title}</strong><span className="font-mono text-[9px] uppercase text-tertiary">{assignment.role}</span></div><p className="mt-1 line-clamp-2 text-[11px] leading-4 text-secondary">{assignment.instruction}</p>{assignment.allowedPaths.length > 0 && <p className="mt-1 truncate font-mono text-[9px] text-tertiary">{assignment.allowedPaths.join(" · ")}</p>}</li>)}</ol>
+    <label className={`mt-3 flex cursor-pointer items-start gap-2 rounded-md border p-2.5 ${fullAccess ? "border-failed/50 bg-[#211719]" : "border-line bg-chrome"}`}><input checked={fullAccess} className="mt-0.5 accent-failed" disabled={busy} onChange={(event) => setFullAccess(event.target.checked)} type="checkbox" /><span><strong className="block text-xs font-medium text-primary">Run agents with full permissions</strong><span className="mt-0.5 block text-[11px] leading-4 text-tertiary">Skips CLI approval prompts and sandboxing. Agents can access your computer outside their worktrees.</span></span></label>
+    <div className="mt-3 flex gap-2"><button className="button-primary" disabled={busy} onClick={() => onApprove(fullAccess)} type="button"><Check aria-hidden="true" size={13} />{busy ? "Starting…" : "Approve and start"}</button><button className="button-secondary" disabled={busy} onClick={onReject} type="button"><X aria-hidden="true" size={13} />Reject plan</button></div>
+  </section>;
+}

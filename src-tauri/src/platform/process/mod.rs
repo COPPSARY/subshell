@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     path::PathBuf,
     sync::{
@@ -52,7 +52,13 @@ impl ProcessSupervisor {
         if let Some(parent) = spec.log_path.parent() {
             fs::create_dir_all(parent).map_err(io_error)?;
         }
-        let log = Arc::new(Mutex::new(File::create(&spec.log_path).map_err(io_error)?));
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&spec.log_path)
+            .map_err(io_error)?;
+        let initial_cursor = log_file.metadata().map_err(io_error)?.len();
+        let log = Arc::new(Mutex::new(log_file));
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -89,11 +95,11 @@ impl ProcessSupervisor {
                     killer,
                 },
             );
-        let cursor = Arc::new(AtomicU64::new(0));
+        let cursor = Arc::new(AtomicU64::new(initial_cursor));
         let read_sink = sink.clone();
         let read_log = log.clone();
         let read_cursor = cursor.clone();
-        thread::spawn(move || {
+        let reader_thread = thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             while let Ok(count) = reader.read(&mut buffer) {
                 if count == 0 {
@@ -111,6 +117,7 @@ impl ProcessSupervisor {
         let handles = self.handles.clone();
         thread::spawn(move || {
             let status = child.wait();
+            let _ = reader_thread.join();
             handles
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -173,6 +180,15 @@ pub fn read_log(
     bytes.truncate(count);
     Ok((bytes, cursor + count as u64))
 }
+
+pub fn read_log_tail(path: &std::path::Path, limit: usize) -> Result<(Vec<u8>, u64), CommandError> {
+    let length = fs::metadata(path).map_err(io_error)?.len();
+    read_log(
+        path,
+        length.saturating_sub(limit.min(64 * 1024) as u64),
+        limit,
+    )
+}
 fn process_error(error: impl std::fmt::Display) -> CommandError {
     CommandError::new("process_error", error.to_string())
 }
@@ -185,6 +201,16 @@ mod tests {
     use super::*;
     use std::{os::unix::fs::PermissionsExt, sync::mpsc, time::Duration};
     use tempfile::tempdir;
+    #[test]
+    fn reads_only_the_latest_log_bytes_for_terminal_restore() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("out.log");
+        fs::write(&log, b"0123456789").unwrap();
+        let (bytes, cursor) = read_log_tail(&log, 4).unwrap();
+        assert_eq!(bytes, b"6789");
+        assert_eq!(cursor, 10);
+    }
+
     #[test]
     fn streams_logs_and_reaps_a_stand_in() {
         let dir = tempdir().unwrap();
@@ -230,5 +256,39 @@ mod tests {
                 .unwrap()
                 .contains("second")
         );
+    }
+
+    #[test]
+    fn appends_output_when_a_session_is_resumed() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("agent");
+        fs::write(&script, "#!/bin/sh\nprintf 'turn\\n'\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let log = dir.path().join("out.log");
+        let supervisor = ProcessSupervisor::default();
+        for _ in 0..2 {
+            let (tx, rx) = mpsc::channel();
+            supervisor
+                .launch(
+                    "r".into(),
+                    ProcessSpec {
+                        executable: script.to_string_lossy().into(),
+                        arguments: vec![],
+                        cwd: dir.path().into(),
+                        environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
+                        log_path: log.clone(),
+                        stdin: None,
+                    },
+                    Arc::new(move |event| {
+                        tx.send(event).unwrap();
+                    }),
+                )
+                .unwrap();
+            while !matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                ProcessNotice::Exited { .. }
+            ) {}
+        }
+        assert_eq!(fs::read_to_string(log).unwrap().matches("turn").count(), 2);
     }
 }

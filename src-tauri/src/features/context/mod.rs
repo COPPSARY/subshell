@@ -107,8 +107,9 @@ pub(crate) fn build(
     let root = project_path(database, &task.project_id)?;
     let available = git.files(&root)?;
     let mut content = format!(
-        "# Task\n\nTitle: {}\n\n{}\n\nAssignment: {}\n\nAcceptance criteria:\n{}\n\nAllowed paths:\n{}\n\nValidation commands:\n{}\n\nDecisions:\n{}\n\n# Built-in safety skill\n\n{}\n",
+        "# Task\n\nTitle: {}\n\nStatus: {}\n\n{}\n\nAssignment: {}\n\nAcceptance criteria:\n{}\n\nAllowed paths:\n{}\n\nValidation commands:\n{}\n\nDecisions:\n{}\n\n# Built-in safety skill\n\n{}\n",
         task.title,
+        task.status,
         task.description,
         input.instruction,
         lines(&task.acceptance_criteria),
@@ -132,6 +133,16 @@ pub(crate) fn build(
     let mut ordered = Vec::new();
     if available.iter().any(|f| f == "AGENTS.md") {
         ordered.push("AGENTS.md".to_string());
+    }
+    let intent = format!("{} {} {}", task.title, task.description, input.instruction);
+    if let Some(phase) = mentioned_phase(&intent) {
+        let prefix = format!("docs/specs/{phase:02}-");
+        ordered.extend(
+            available
+                .iter()
+                .filter(|file| file.starts_with(&prefix))
+                .cloned(),
+        );
     }
     if let Some(pattern) = input.pattern.filter(|p| !p.trim().is_empty()) {
         for file in &available {
@@ -258,6 +269,18 @@ fn lines(values: &[String]) -> String {
             .join("\n")
     }
 }
+fn mentioned_phase(value: &str) -> Option<u8> {
+    let words = value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    words.windows(2).find_map(|pair| {
+        pair[0]
+            .eq_ignore_ascii_case("phase")
+            .then(|| pair[1].parse().ok())
+            .flatten()
+    })
+}
 fn star_match(pattern: &str, value: &str) -> bool {
     let parts = pattern.split('*').collect::<Vec<_>>();
     if parts.len() == 1 {
@@ -292,5 +315,11 @@ mod tests {
     fn wildcard_matching_is_bounded_and_predictable() {
         assert!(star_match("src/*.rs", "src/app.rs"));
         assert!(!star_match("src/*.rs", "tests/app.rs"));
+    }
+
+    #[test]
+    fn finds_a_relevant_numbered_phase_without_guessing_other_numbers() {
+        assert_eq!(mentioned_phase("Can you implement phase 3?"), Some(3));
+        assert_eq!(mentioned_phase("Fix issue 3"), None);
     }
 }
