@@ -1,0 +1,1 @@
+export type GenericProfile = { id: string; displayName: string; executablePath: string; arguments: string[]; promptMode: "argument" | "stdin"; configRootEnvVar: string | null; configSourcePath: string | null };

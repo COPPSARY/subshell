@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="SubShell">
+  <rect x="12" y="12" width="488" height="488" rx="112" fill="#090a0c"/>
+  <rect x="18" y="18" width="476" height="476" rx="106" fill="none" stroke="#303237" stroke-width="8"/>
+  <path
+    d="M356 150H220c-49 0-82 26-82 64s33 64 82 64h72c49 0 82 26 82 64s-33 64-82 64H156"
+    fill="none"
+    stroke="#eeeeef"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="52"
+  />
+</svg>

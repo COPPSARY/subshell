@@ -1,0 +1,2 @@
+export type Run = { id: string; taskId: string; providerId: string; providerName: string; instruction: string; status: string; worktreePath: string | null; rawLogPath: string | null; contextPackPath: string | null; port: number | null; updatedAt: string };
+export type RunEvent = { type: "started"; runId: string } | { type: "output"; runId: string; bytes: number[]; cursor: number } | { type: "statusChanged"; runId: string; status: string } | { type: "failed"; runId: string; error: { message: string } };

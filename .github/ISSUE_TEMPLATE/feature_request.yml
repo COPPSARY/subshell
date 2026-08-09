@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a focused improvement to SubShell
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the coordination or developer problem, not only a proposed UI.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What should a user be able to accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Suggested scope
+      description: Note affected features, contracts, and deliberately excluded work.
+
