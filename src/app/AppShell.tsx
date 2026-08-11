@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Search } from "lucide-react";
 import appIconUrl from "../../assets/app-icon.svg";
 import { getHealth } from "../features/health";
 import { ProjectsView, restoreProject, type Project } from "../features/projects";
@@ -9,6 +10,8 @@ import { createTask, getTask, listTasks, TasksView, type Task } from "../feature
 import { TimelineView } from "../features/timeline";
 import { destinations, type DestinationName } from "./navigation";
 import { WorkspaceRail } from "./WorkspaceRail";
+import { CommandPalette, type AppCommand } from "./CommandPalette";
+import { SafeQuitDialog } from "./SafeQuitDialog";
 
 export function AppShell() {
   const [active, setActive] = useState<DestinationName>("Projects");
@@ -19,6 +22,7 @@ export function AppShell() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [quitActiveRuns, setQuitActiveRuns] = useState<number | null>(null);
+  const [commandsOpen, setCommandsOpen] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -40,6 +44,11 @@ export function AppShell() {
     return () => { disposed = true; unlisten(); };
   }, []);
   useEffect(() => { if (project) listTasks(project.id).then(setTasks).catch(() => setTasks([])); else setTasks([]); }, [project?.id, active]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setCommandsOpen((value) => !value); } };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, []);
 
   async function startGoal(selectedProject: Project, goal: string, confirmDirtyBase: boolean) {
     const task = await createTask({
@@ -51,6 +60,7 @@ export function AppShell() {
     });
     setProject(selectedProject); setSelectedTask(task); setAutoStartTaskId(task.id); setSelectedRunId(null); setActive("Tasks");
   }
+  const commands = useMemo<AppCommand[]>(() => destinations.map((destination) => ({ id: `open-${destination.name.toLowerCase()}`, label: `Open ${destination.name}`, detail: destination.name === "Projects" ? "Open a repository or start a goal" : `Go to the ${destination.name.toLowerCase()} workspace`, run: () => setActive(destination.name) })), []);
   const activeView = active === "Projects"
     ? <ProjectsView selectedProject={project} onSelect={(nextProject) => { if (nextProject.id !== project?.id) { setSelectedTask(null); setSelectedRunId(null); setAutoStartTaskId(null); } setProject(nextProject); }} onStartGoal={startGoal} />
     : active === "Tasks"
@@ -63,9 +73,10 @@ export function AppShell() {
 
   return (
     <div className="grid h-full overflow-hidden grid-cols-[14rem_minmax(0,1fr)] bg-app xl:grid-cols-[15rem_minmax(0,1fr)]">
+      <a className="sr-only z-[60] rounded bg-primary px-3 py-2 text-app focus:not-sr-only focus:fixed focus:left-3 focus:top-3" href="#main-content">Skip to main content</a>
       <aside className="flex min-h-0 flex-col border-r border-line bg-chrome">
         <div className="flex h-12 items-center gap-3 border-b border-line px-4">
-          <img alt="" aria-hidden="true" className="size-7" src={appIconUrl} />
+          <img alt="" aria-hidden="true" className="size-7" height="28" src={appIconUrl} width="28" />
           <div className="grid gap-0.5">
             <strong className="text-sm tracking-wide text-primary">SubShell</strong>
             <span className="text-[11px] text-tertiary">Agent coordination</span>
@@ -77,12 +88,13 @@ export function AppShell() {
         {healthFailed && <div aria-live="polite" className="mt-auto flex min-h-11 items-center gap-2 border-t border-line px-4 font-mono text-[11px] text-failed" role="status"><span aria-hidden="true" className="size-1.5 rounded-full bg-failed" />Backend unavailable</div>}
       </aside>
 
-      <main className="min-h-0 min-w-0 bg-app">
+      <main className="min-h-0 min-w-0 bg-app" id="main-content">
         <header className="flex h-12 items-center border-b border-line bg-chrome px-4 text-xs text-tertiary">
           <div className="flex items-center gap-2">
             <span>{project?.name ?? "SubShell"}</span><span aria-hidden="true">/</span><strong className="font-medium text-primary">{active}</strong>
           </div>
           <nav className="ml-auto flex items-center gap-1" aria-label="Primary navigation">
+            <button aria-label="Open command palette" className="group flex h-8 items-center gap-2 rounded-md px-2.5 text-xs text-secondary outline-none hover:bg-panel hover:text-primary focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent" onClick={() => setCommandsOpen(true)} title="Command palette (Ctrl/Cmd+K)" type="button"><Search aria-hidden="true" size={14} /><span className="hidden xl:inline">Commands</span><kbd className="hidden font-mono text-[9px] text-tertiary 2xl:inline">⌘K</kbd></button>
             {destinations.map((destination) => {
               const Icon = destination.icon;
               return <button aria-label={destination.name} aria-current={destination.name === active ? "page" : undefined} className="group flex h-8 items-center gap-2 rounded-md px-2.5 text-xs text-secondary hover:bg-panel hover:text-primary focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent aria-[current=page]:bg-selected aria-[current=page]:text-primary" key={destination.name} onClick={() => setActive(destination.name)} title={destination.name} type="button"><Icon aria-hidden="true" className="group-aria-[current=page]:text-accent" size={14} strokeWidth={1.6} /><span className="hidden xl:inline">{destination.name}</span></button>;
@@ -93,7 +105,8 @@ export function AppShell() {
           {activeView}
         </section>
       </main>
-      {quitActiveRuns != null && <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"><section aria-labelledby="quit-title" aria-modal="true" className="form-panel w-full max-w-md" role="dialog"><div><h2 className="text-base font-medium text-primary" id="quit-title">Agents are still running</h2><p className="mt-2 text-sm leading-6 text-secondary">{quitActiveRuns} active run{quitActiveRuns === 1 ? "" : "s"} would be interrupted. Keep SubShell minimized, stop the runs safely, or cancel.</p></div><div className="flex flex-wrap justify-end gap-2"><button autoFocus className="button-secondary" onClick={() => setQuitActiveRuns(null)} type="button">Cancel</button><button className="button-secondary" onClick={() => { void decideQuit("preserve"); setQuitActiveRuns(null); }} type="button">Keep running</button><button className="button-danger" onClick={() => { void decideQuit("stop"); setQuitActiveRuns(null); }} type="button">Stop and quit</button></div></section></div>}
+      <CommandPalette commands={commands} onClose={() => setCommandsOpen(false)} open={commandsOpen} />
+      {quitActiveRuns != null && <SafeQuitDialog activeRuns={quitActiveRuns} onDecision={(decision) => { if (decision !== "cancel") void decideQuit(decision); setQuitActiveRuns(null); }} />}
     </div>
   );
 }

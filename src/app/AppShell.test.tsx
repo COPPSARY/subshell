@@ -41,14 +41,14 @@ describe("AppShell", () => {
     mockedHealth.mockReturnValueOnce(new Promise(() => undefined));
     render(<AppShell />);
 
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText("Backend unavailable")).toBeNull();
     expect(screen.queryByText("Quick open")).toBeNull();
   });
 
   it("keeps navigation available when backend health fails", async () => {
     mockedHealth.mockRejectedValueOnce(new Error("unavailable"));
     render(<AppShell />);
-    expect((await screen.findByRole("status")).textContent).toContain("Backend unavailable");
+    expect(await screen.findByText("Backend unavailable")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Tasks" })).toBeTruthy();
   });
 

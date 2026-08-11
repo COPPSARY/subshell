@@ -10,7 +10,7 @@
   --color-line-strong: #30343c;
   --color-primary: #e2e4e8;
   --color-secondary: #9297a2;
-  --color-tertiary: #666b76;
+  --color-tertiary: #808691;
   --color-accent: #4f83ff;
   --color-accent-muted: #2563eb;
   --color-complete: #3fa66f;
@@ -36,8 +36,10 @@ html, body, #root {
 }
 
 * { box-sizing: border-box; }
-button { font: inherit; }
+button { font: inherit; touch-action: manipulation; }
 button, input, textarea, select { color: inherit; }
+.font-mono { font-variant-numeric: tabular-nums; }
+.virtual-row { content-visibility: auto; contain-intrinsic-size: auto 4rem; }
 
 .button-primary, .button-secondary, .button-danger, .icon-button {
   display: inline-flex;
@@ -79,5 +81,5 @@ button, input, textarea, select { color: inherit; }
 .check-row { display: flex !important; align-items: center; gap: 0.5rem; min-height: 1.75rem; font-family: ui-monospace, monospace; font-size: 0.7rem !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition-duration: 0.01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
 }
