@@ -59,7 +59,7 @@ Automated tests use stand-in executables. Real provider checks are manual and sh
 
 - Press `Ctrl+K` or `Cmd+K` to open the command palette. Arrow keys select, `Enter` runs a command, and `Escape` closes and restores focus.
 - All task, approval, review, and merge controls are normal keyboard-focusable controls. A skip link appears when focus enters the window.
-- Closing SubShell with active runs asks whether to keep them supervised, stop them safely, or cancel. After a restart, live supervised runs remain attached; a lost process is recorded as failed without deleting its log, worktree, or provider session, so supported providers can resume it.
+- Closing SubShell with active runs asks whether to keep the app supervising them in the background, stop them safely, or cancel. After a controlled restart, a dead process with a supported provider session resumes in the same Run and appends to the same log. A still-live process is never duplicated, and unrecoverable process loss keeps its log and worktree for inspection.
 
 ## Preview and Troubleshooting
 

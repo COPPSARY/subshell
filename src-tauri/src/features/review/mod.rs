@@ -156,6 +156,11 @@ pub(crate) fn get_or_create(
     paths: &RuntimePaths,
     git: &GitService,
 ) -> Result<Review, CommandError> {
+    if let Some(review) = latest_review(database, task_id)?
+        && review.decision == "approved"
+    {
+        return Ok(review);
+    }
     let task = reviewable_task(database, task_id)?;
     let evidence = validation_evidence(database, task_id)?;
     let captured = capture_runs(database, git, &task)?;
@@ -1111,6 +1116,9 @@ mod tests {
         .as_str()
         .unwrap()
         .to_string();
+        let archived_review = invoke(&webview, "review_get", serde_json::json!({"taskId":"task"}));
+        assert_eq!(archived_review["id"], approved["id"]);
+        assert_eq!(archived_review["combinedPatch"], pending["combinedPatch"]);
 
         assert_eq!(
             git.status(&repository).unwrap().revision.as_deref(),

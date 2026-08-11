@@ -5,7 +5,7 @@ import { enqueueMerge } from "../workspace";
 import { approveReview, getReview, mergeReview, sendBackReview } from "./api";
 import type { Review } from "./model";
 
-export function ReviewView({ taskId }: { taskId: string }) {
+export function ReviewView({ taskId, readOnly = false }: { taskId: string; readOnly?: boolean }) {
   const [review, setReview] = useState<Review | null>(null);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
@@ -43,7 +43,8 @@ export function ReviewView({ taskId }: { taskId: string }) {
     <header className="flex flex-wrap items-start gap-4 border-b border-line pb-4">
       <div className="min-w-0 flex-1"><p className="text-[11px] font-semibold uppercase tracking-wider text-tertiary">Combined review · attempt {review.attemptNumber}</p><h2 className="mt-1 text-xl font-medium">{review.runs.length} agent result{review.runs.length === 1 ? "" : "s"}</h2><p className="mt-1 font-mono text-[11px] text-tertiary">Base {review.baseRevision.slice(0, 8)} · {review.fingerprint.slice(0, 12)}</p></div>
       {review.decision === "pending" && <button className="button-primary" disabled={busy} onClick={() => act(() => approveReview(review.id, review.fingerprint))} type="button"><Check size={14} />Approve exact result</button>}
-      {review.decision === "approved" && !mergedRevision && !queued && <><button className="button-secondary" disabled={busy} onClick={queueMerge} type="button"><ListPlus size={14} />Add to merge queue</button><button className="button-primary" disabled={busy} onClick={merge} type="button"><GitMerge size={14} />Merge locally</button></>}
+      {review.decision === "approved" && readOnly && <span className="status-pill text-complete">Merged and archived</span>}
+      {review.decision === "approved" && !readOnly && !mergedRevision && !queued && <><button className="button-secondary" disabled={busy} onClick={queueMerge} type="button"><ListPlus size={14} />Add to merge queue</button><button className="button-primary" disabled={busy} onClick={merge} type="button"><GitMerge size={14} />Merge locally</button></>}
       {queued && <span className="status-pill text-waiting">Queued for merge</span>}
       {mergedRevision && <span className="status-pill text-complete">Merged {mergedRevision.slice(0, 8)}</span>}
     </header>

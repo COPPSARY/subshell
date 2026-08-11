@@ -37,3 +37,12 @@ it("shows structured backend errors instead of object coercion", async () => {
 
   expect((await screen.findByRole("alert")).textContent).toBe("Task must be ready for review");
 });
+
+it("shows an archived review without offering another merge", async () => {
+  vi.mocked(getReview).mockResolvedValueOnce({ ...review, decision: "approved" });
+
+  render(<ReviewView readOnly taskId="task" />);
+
+  expect(await screen.findByText("Merged and archived")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Merge locally" })).toBeNull();
+});
