@@ -53,10 +53,12 @@ it("previews editable context and adds independent assignments", async () => {
 it("turns a quick goal into a context-backed run automatically", async () => {
   const consumed = vi.fn();
   const plannerInstruction = "Inspect this goal and repository, then submit a bounded parallel plan through SubShell. Do not edit files in the planner Run.";
+  const planner = { id: "run-1", taskId: "task", providerId: "p1", providerName: "Stand-in", instruction: plannerInstruction, role: "planner", status: "running", worktreePath: "/tmp/worktree", rawLogPath: "/tmp/log", contextPackPath: "/tmp/context", canResume: true, port: 4100, updatedAt: "now" };
   let onRunEvent: Parameters<typeof startRuns>[2] = () => undefined;
+  vi.mocked(listRuns).mockResolvedValueOnce([]).mockResolvedValue([planner]);
   vi.mocked(startRuns).mockImplementation(async (_taskId, _assignments, onEvent) => {
     onRunEvent = onEvent;
-    return [{ id: "run-1", taskId: "task", providerId: "p1", providerName: "Stand-in", instruction: plannerInstruction, role: "planner", status: "running", worktreePath: "/tmp/worktree", rawLogPath: "/tmp/log", contextPackPath: "/tmp/context", canResume: true, port: 4100, updatedAt: "now" }];
+    return [planner];
   });
   render(<RunWorkspace autoStart onAutoStartConsumed={consumed} project={{ id: "project", name: "Repo", path: "/tmp/repo", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }} task={{ id: "task", projectId: "project", title: "Fix", description: "Fix the bug", status: "task", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" }} />);
   await waitFor(() => expect(startRuns).toHaveBeenCalled());
