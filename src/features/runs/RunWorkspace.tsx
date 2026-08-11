@@ -47,8 +47,8 @@ export function RunWorkspace({ project, task, autoStart = false, initialRunId, o
     const instruction = "Inspect this goal and repository, then submit a bounded parallel plan through SubShell. Do not edit files in the planner Run.";
     Promise.resolve(providers[0] ?? detectProviders().then((installed) => {
       const detected = installed[0];
-      if (!detected) throw new Error("No supported AI CLI was found. Install Claude Code, Codex, or Gemini, or add a Custom CLI in Providers.");
-      return createProvider({ id: "", displayName: detected.displayName, executablePath: detected.executablePath, arguments: detected.arguments, resumeArguments: detected.resumeArguments, promptMode: detected.promptMode, configRootEnvVar: null, configSourcePath: null, inheritUserHome: true });
+      if (!detected) throw new Error("No supported AI CLI was found. Install Claude Code, Codex, Kiro, or Gemini, or add a Custom CLI in Providers.");
+      return createProvider({ id: "", displayName: detected.displayName, providerType: detected.key, executablePath: detected.executablePath, arguments: detected.arguments, resumeArguments: detected.resumeArguments, promptMode: detected.promptMode, configRootEnvVar: detected.configRootEnvVar, configSourcePath: null, inheritUserHome: false });
     }))
       .then(async (provider) => {
         setProviders((current) => current.length ? current : [provider]);

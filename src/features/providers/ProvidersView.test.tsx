@@ -7,15 +7,15 @@ vi.mock("./api", () => ({ createProvider: vi.fn(), detectProviders: vi.fn(), lis
 
 beforeEach(() => {
   vi.mocked(listProviders).mockResolvedValue([]);
-  vi.mocked(detectProviders).mockResolvedValue([{ key: "claude", displayName: "Claude Code", executablePath: "/usr/bin/claude", arguments: ["--session-id", "{sessionId}", "{prompt}"], resumeArguments: ["--resume", "{sessionId}"], promptMode: "argument", isConfigured: false }]);
-  vi.mocked(createProvider).mockResolvedValue({ id: "profile-1", displayName: "Claude Code", executablePath: "/usr/bin/claude", arguments: ["--session-id", "{sessionId}", "{prompt}"], resumeArguments: ["--resume", "{sessionId}"], promptMode: "argument", configRootEnvVar: null, configSourcePath: null, inheritUserHome: true });
+  vi.mocked(detectProviders).mockResolvedValue([{ key: "claude", displayName: "Claude Code", executablePath: "/usr/bin/claude", arguments: ["--session-id", "{sessionId}", "{prompt}"], resumeArguments: ["--resume", "{sessionId}"], promptMode: "argument", configRootEnvVar: "CLAUDE_CONFIG_DIR", authProbeArguments: ["auth", "status"], capabilities: { nativeSkills: false, reportsUsage: false, interactiveInput: true }, isConfigured: false }]);
+  vi.mocked(createProvider).mockResolvedValue({ id: "profile-1", displayName: "Claude Code", executablePath: "/usr/bin/claude", arguments: ["--session-id", "{sessionId}", "{prompt}"], resumeArguments: ["--resume", "{sessionId}"], promptMode: "argument", configRootEnvVar: "CLAUDE_CONFIG_DIR", configSourcePath: null, inheritUserHome: false });
 });
 
 it("configures a detected CLI with one explicit click", async () => {
   render(<ProvidersView />);
-  fireEvent.click(await screen.findByRole("button", { name: "Use existing login" }));
-  expect(createProvider).toHaveBeenCalledWith(expect.objectContaining({ displayName: "Claude Code", inheritUserHome: true }));
-  expect(await screen.findByText("Using existing CLI login")).toBeTruthy();
+  fireEvent.click(await screen.findByRole("button", { name: "Configure" }));
+  expect(createProvider).toHaveBeenCalledWith(expect.objectContaining({ displayName: "Claude Code", configRootEnvVar: "CLAUDE_CONFIG_DIR", inheritUserHome: false }));
+  expect(await screen.findByText("Isolated configuration")).toBeTruthy();
 });
 
 it("keeps custom arguments behind the advanced action", async () => {

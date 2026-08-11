@@ -1,3 +1,5 @@
+pub mod adapters;
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -18,17 +20,6 @@ use crate::{
         keychain::{SecretStore, SystemSecretStore},
     },
 };
-
-const KNOWN_PROVIDERS: [(&str, &str, &[&str], &[&str]); 3] = [
-    (
-        "claude",
-        "Claude Code",
-        &["--session-id", "{sessionId}", "{prompt}"],
-        &["--resume", "{sessionId}"],
-    ),
-    ("codex", "Codex", &["{prompt}"], &["resume", "--last"]),
-    ("gemini", "Gemini CLI", &["-i", "{prompt}"], &[]),
-];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +52,9 @@ pub struct DetectedProvider {
     pub arguments: Vec<String>,
     pub resume_arguments: Vec<String>,
     pub prompt_mode: &'static str,
+    pub config_root_env_var: Option<&'static str>,
+    pub auth_probe_arguments: Vec<String>,
+    pub capabilities: adapters::ProviderCapabilities,
     pub is_configured: bool,
 }
 
@@ -69,21 +63,17 @@ pub struct ResolvedProvider {
     pub config_source_path: Option<String>,
     pub config_root_env_var: Option<String>,
     pub inherit_user_home: bool,
-    pub provider_type: String,
     executable_path: String,
     arguments: Vec<String>,
     resume_arguments: Vec<String>,
     prompt_mode: String,
+    secret_environment_key: Option<&'static str>,
+    full_access_flag: Option<&'static str>,
 }
 
 impl ResolvedProvider {
     pub fn secret_environment_key(&self) -> Option<&'static str> {
-        match self.provider_type.as_str() {
-            "claude" => Some("ANTHROPIC_API_KEY"),
-            "codex" => Some("OPENAI_API_KEY"),
-            "gemini" => Some("GEMINI_API_KEY"),
-            _ => None,
-        }
+        self.secret_environment_key
     }
 
     pub fn new_session_id(&self) -> Option<String> {
@@ -151,20 +141,12 @@ impl ResolvedProvider {
     }
 
     fn full_access_flag(&self) -> Result<&'static str, CommandError> {
-        let executable = Path::new(&self.executable_path)
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        match executable.as_str() {
-            "claude" => Ok("--dangerously-skip-permissions"),
-            "codex" => Ok("--dangerously-bypass-approvals-and-sandbox"),
-            "gemini" => Ok("--approval-mode=yolo"),
-            _ => Err(CommandError::new(
+        self.full_access_flag.ok_or_else(|| {
+            CommandError::new(
                 "full_access_unsupported",
-                "Full permissions are supported only for detected Claude Code, Codex, and Gemini CLI profiles",
-            )),
-        }
+                "This provider profile does not support full permissions",
+            )
+        })
     }
 }
 
@@ -391,9 +373,9 @@ pub fn resolve(database: &Database, id: &str) -> Result<ResolvedProvider, Comman
             "Provider account requires reauthentication before starting a run",
         ));
     }
+    let adapter = adapters::by_key(&profile.provider_type);
     Ok(ResolvedProvider {
         id: profile.id,
-        provider_type: profile.provider_type,
         executable_path: profile.executable_path,
         arguments: profile.arguments,
         resume_arguments: profile.resume_arguments,
@@ -401,6 +383,8 @@ pub fn resolve(database: &Database, id: &str) -> Result<ResolvedProvider, Comman
         config_root_env_var: profile.config_root_env_var,
         config_source_path: profile.config_source_path,
         inherit_user_home: profile.inherit_user_home,
+        secret_environment_key: adapter.and_then(|adapter| adapter.secret_env_var()),
+        full_access_flag: adapter.map(|adapter| adapter.full_access_flag()),
     })
 }
 pub(crate) fn list(database: &Database) -> Result<Vec<GenericProfile>, CommandError> {
@@ -497,27 +481,36 @@ fn active_status() -> String {
 
 fn detect(database: &Database) -> Result<Vec<DetectedProvider>, CommandError> {
     let configured = list(database)?;
-    Ok(KNOWN_PROVIDERS
-        .into_iter()
-        .filter_map(|(key, display_name, arguments, resume_arguments)| {
-            let executable = find_executable(key)?;
+    Ok(adapters::ADAPTERS
+        .iter()
+        .filter_map(|adapter| {
+            let executable = find_executable(adapter.executable())?;
             let executable_path = executable.to_string_lossy().into_owned();
             Some(DetectedProvider {
-                key,
-                display_name,
+                key: adapter.key(),
+                display_name: adapter.display_name(),
                 is_configured: configured
                     .iter()
                     .any(|profile| profile.executable_path == executable_path),
                 executable_path,
-                arguments: arguments
+                arguments: adapter
+                    .launch_arguments()
                     .iter()
                     .map(|argument| (*argument).into())
                     .collect(),
-                resume_arguments: resume_arguments
+                resume_arguments: adapter
+                    .resume_arguments()
                     .iter()
                     .map(|argument| (*argument).into())
                     .collect(),
                 prompt_mode: "argument",
+                config_root_env_var: adapter.config_root_env_var(),
+                auth_probe_arguments: adapter
+                    .auth_probe_arguments()
+                    .iter()
+                    .map(|argument| (*argument).into())
+                    .collect(),
+                capabilities: adapter.capabilities(),
             })
         })
         .collect())
@@ -571,6 +564,7 @@ fn io_error(error: std::io::Error) -> CommandError {
 
 #[cfg(test)]
 mod tests {
+    use super::adapters::ProviderAdapter;
     use super::*;
     use crate::platform::keychain::MemorySecretStore;
     use tempfile::tempdir;
@@ -594,7 +588,6 @@ mod tests {
         validate(&p).unwrap();
         let resolved = ResolvedProvider {
             id: p.id,
-            provider_type: p.provider_type,
             executable_path: p.executable_path,
             arguments: p.arguments,
             resume_arguments: p.resume_arguments,
@@ -602,6 +595,8 @@ mod tests {
             config_root_env_var: None,
             config_source_path: None,
             inherit_user_home: false,
+            secret_environment_key: None,
+            full_access_flag: None,
         };
         let (_, args, _) = resolved
             .launch_command("hello; touch /tmp/nope", dir.path(), None, false)
@@ -619,13 +614,12 @@ mod tests {
     #[test]
     fn detected_provider_recipes_start_interactive_sessions() {
         assert_eq!(
-            KNOWN_PROVIDERS[0].2,
+            adapters::CLAUDE.launch_arguments(),
             ["--session-id", "{sessionId}", "{prompt}"]
         );
-        assert_eq!(KNOWN_PROVIDERS[0].3, ["--resume", "{sessionId}"]);
-        assert_eq!(KNOWN_PROVIDERS[1].2, ["{prompt}"]);
-        assert_eq!(KNOWN_PROVIDERS[1].3, ["resume", "--last"]);
-        assert_eq!(KNOWN_PROVIDERS[2].2, ["-i", "{prompt}"]);
+        assert_eq!(adapters::CODEX.resume_arguments(), ["resume", "--last"]);
+        assert_eq!(adapters::KIRO.launch_arguments(), ["chat", "{prompt}"]);
+        assert_eq!(adapters::GEMINI.launch_arguments(), ["-i", "{prompt}"]);
     }
 
     #[test]
@@ -633,7 +627,6 @@ mod tests {
         let root = tempdir().unwrap();
         let resolved = ResolvedProvider {
             id: "claude".into(),
-            provider_type: "claude".into(),
             executable_path: "/usr/bin/claude".into(),
             arguments: vec![
                 "--session-id".into(),
@@ -645,6 +638,8 @@ mod tests {
             config_root_env_var: None,
             config_source_path: None,
             inherit_user_home: true,
+            secret_environment_key: Some("ANTHROPIC_API_KEY"),
+            full_access_flag: Some("--dangerously-skip-permissions"),
         };
         let session_id = resolved.new_session_id().unwrap();
         let (_, launch, _) = resolved
@@ -661,17 +656,23 @@ mod tests {
     #[test]
     fn full_access_uses_each_supported_cli_native_flag() {
         let root = tempdir().unwrap();
-        for (executable, expected) in [
-            ("/usr/bin/claude", "--dangerously-skip-permissions"),
+        for (provider_type, executable, expected) in [
             (
+                "claude",
+                "/usr/bin/claude",
+                "--dangerously-skip-permissions",
+            ),
+            (
+                "codex",
                 "/usr/bin/codex",
                 "--dangerously-bypass-approvals-and-sandbox",
             ),
-            ("/usr/bin/gemini", "--approval-mode=yolo"),
+            ("kiro", "/usr/bin/kiro-cli", "--trust-all-tools"),
+            ("gemini", "/usr/bin/gemini", "--approval-mode=yolo"),
         ] {
+            let adapter = adapters::by_key(provider_type).unwrap();
             let resolved = ResolvedProvider {
                 id: executable.into(),
-                provider_type: "generic".into(),
                 executable_path: executable.into(),
                 arguments: vec!["{prompt}".into()],
                 resume_arguments: vec!["resume".into()],
@@ -679,6 +680,8 @@ mod tests {
                 config_root_env_var: None,
                 config_source_path: None,
                 inherit_user_home: true,
+                secret_environment_key: adapter.secret_env_var(),
+                full_access_flag: Some(adapter.full_access_flag()),
             };
             let (_, launch, _) = resolved
                 .launch_command("work", root.path(), None, true)
