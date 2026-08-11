@@ -1696,7 +1696,7 @@ mod tests {
         let executable = root.path().join("stand-in");
         fs::write(
             &executable,
-            "#!/bin/sh\nprintf 'argc:%s mode:%s session:%s\\n' \"$#\" \"$1\" \"$2\"\nsleep 0.4\nprintf '{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\\nfinished\\n'\n",
+            "#!/bin/sh\ncase \"$1:$ANTHROPIC_API_KEY\" in first:alpha-secret|resume:alpha-secret|second:beta-secret) ;; *) printf 'cross-account credential\\n'; exit 2;; esac\nprintf 'argc:%s mode:%s session:%s config:%s secret:%s\\n' \"$#\" \"$1\" \"$2\" \"$CLAUDE_CONFIG_DIR\" \"$ANTHROPIC_API_KEY\"\nsleep 0.4\nprintf '{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\\nfinished\\n'\n",
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1706,14 +1706,21 @@ mod tests {
             provider_type: "claude".into(),
             status: "active".into(),
             executable_path: executable.to_string_lossy().into(),
-            arguments: vec!["start".into(), "{sessionId}".into(), "{prompt}".into()],
+            arguments: vec!["first".into(), "{sessionId}".into(), "{prompt}".into()],
             resume_arguments: vec!["resume".into(), "{sessionId}".into()],
             prompt_mode: "argument".into(),
-            config_root_env_var: Some("STANDIN_HOME".into()),
+            config_root_env_var: Some("CLAUDE_CONFIG_DIR".into()),
             config_source_path: None,
             inherit_user_home: false,
         };
         providers::save(&profile, &database, &paths).unwrap();
+        let second_profile = GenericProfile {
+            id: "stand-in-two".into(),
+            display_name: "Stand-in two".into(),
+            arguments: vec!["second".into(), "{sessionId}".into(), "{prompt}".into()],
+            ..profile.clone()
+        };
+        providers::save(&second_profile, &database, &paths).unwrap();
         let drafts = ContextDrafts::default();
         let preview = || {
             context::build(
@@ -1753,6 +1760,9 @@ mod tests {
                 .iter()
                 .any(|entry| entry.source == "large.txt" && !entry.included)
         );
+        let secrets = Arc::new(crate::platform::keychain::MemorySecretStore::default());
+        secrets.set(&profile.id, b"alpha-secret").unwrap();
+        secrets.set(&second_profile.id, b"beta-secret").unwrap();
         let service = RunService::new(
             database.clone(),
             paths,
@@ -1760,10 +1770,10 @@ mod tests {
             drafts.clone(),
             ProcessSupervisor::default(),
             PortLeases::default(),
-            Arc::new(crate::platform::keychain::MemorySecretStore::default()),
+            secrets,
         );
-        let assignment = |preview: context::ContextPreview| Assignment {
-            provider_id: profile.id.clone(),
+        let assignment = |preview: context::ContextPreview, provider_id: &str| Assignment {
+            provider_id: provider_id.into(),
             instruction: "Work safely".into(),
             role: "executor".into(),
             title: None,
@@ -1776,7 +1786,10 @@ mod tests {
             .start(
                 StartInput {
                     task_id: task.id.clone(),
-                    assignments: vec![assignment(first), assignment(second)],
+                    assignments: vec![
+                        assignment(first, &profile.id),
+                        assignment(second, &second_profile.id),
+                    ],
                 },
                 Channel::new(|_| Ok(())),
             )
@@ -1814,7 +1827,7 @@ mod tests {
         let queued = service
             .enqueue(StartInput {
                 task_id: queued_task.id.clone(),
-                assignments: vec![assignment(queued_preview)],
+                assignments: vec![assignment(queued_preview, &profile.id)],
             })
             .unwrap();
         assert_eq!(queued[0].status, "queued");
@@ -1834,6 +1847,23 @@ mod tests {
         assert_eq!(states[1].status, "succeeded");
         assert_eq!(states[1].reported_input_tokens, Some(12));
         assert_eq!(states[1].reported_output_tokens, Some(4));
+        for state in &states {
+            let output = fs::read_to_string(state.raw_log_path.as_ref().unwrap()).unwrap();
+            assert!(
+                output.contains(
+                    &root
+                        .path()
+                        .join("data/runs")
+                        .join(&state.id)
+                        .join("config")
+                        .to_string_lossy()
+                        .into_owned()
+                )
+            );
+            assert!(!output.contains("alpha-secret"));
+            assert!(!output.contains("beta-secret"));
+            assert!(!output.contains("cross-account credential"));
+        }
         assert_eq!(
             service.mark_complete(&states[0].id).unwrap().status,
             "succeeded"
@@ -1869,7 +1899,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         let log = fs::read_to_string(resumed.raw_log_path.as_ref().unwrap()).unwrap();
-        assert!(log.contains(&format!("argc:3 mode:start session:{session_id}")));
+        assert!(log.contains(&format!("argc:3 mode:first session:{session_id}")));
         assert!(log.contains(&format!("argc:2 mode:resume session:{session_id}")));
         assert_eq!(
             fs::read_to_string(repository.join("README.md")).unwrap(),
