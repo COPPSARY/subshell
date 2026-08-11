@@ -52,6 +52,8 @@ pub fn run() {
             run_service
                 .recover_and_dispatch()
                 .map_err(|error| std::io::Error::other(error.message))?;
+            agent_actions::recover(&database, &run_service, &paths, &git, &processes)
+                .map_err(|error| std::io::Error::other(error.message))?;
             app.manage(run_service);
             app.manage(preview_service);
             app.manage(database);

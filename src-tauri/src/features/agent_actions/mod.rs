@@ -45,6 +45,31 @@ fn decide_and_execute(
     agent_api::finish_execution(database, &request, result)
 }
 
+pub fn recover(
+    database: &Database,
+    runs: &RunService,
+    paths: &RuntimePaths,
+    git: &GitService,
+    processes: &ProcessSupervisor,
+) -> Result<(), CommandError> {
+    for request in agent_api::interrupted_executions(database)? {
+        if request.execution_status == "running" {
+            agent_api::finish_execution(
+                database,
+                &request,
+                Err(CommandError::new(
+                    "approval_execution_interrupted",
+                    "SubShell closed while the approved action was running; its state was preserved for review",
+                )),
+            )?;
+        } else if agent_api::claim_execution(database, &request.id)? {
+            let result = execute(&request, database, runs, paths, git, processes);
+            agent_api::finish_execution(database, &request, result)?;
+        }
+    }
+    Ok(())
+}
+
 fn execute(
     request: &ApprovalRequest,
     database: &Database,
@@ -474,6 +499,77 @@ mod tests {
                 )
                 .unwrap(),
             "waiting"
+        );
+    }
+
+    #[test]
+    fn startup_recovers_only_actions_that_never_started() {
+        let (root, database, runs, paths, git, processes) = fixture();
+        let safe = agent_api::request(
+            &database,
+            agent_api::RequestInput {
+                run_id: "run".into(),
+                action: "create_branch".into(),
+                arguments: serde_json::json!({"name":"recovered/change"}),
+            },
+        )
+        .unwrap();
+        agent_api::decide(&database, &safe.id, "approved").unwrap();
+
+        recover(&database, &runs, &paths, &git, &processes).unwrap();
+
+        assert_eq!(
+            agent_api::get_approval(&database, &safe.id)
+                .unwrap()
+                .execution_status,
+            "succeeded"
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/recovered/change"
+                ])
+                .current_dir(root.path().join("repository"))
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let uncertain = agent_api::request(
+            &database,
+            agent_api::RequestInput {
+                run_id: "run".into(),
+                action: "create_branch".into(),
+                arguments: serde_json::json!({"name":"must-not-replay"}),
+            },
+        )
+        .unwrap();
+        agent_api::decide(&database, &uncertain.id, "approved").unwrap();
+        assert!(agent_api::claim_execution(&database, &uncertain.id).unwrap());
+
+        recover(&database, &runs, &paths, &git, &processes).unwrap();
+
+        let uncertain = agent_api::get_approval(&database, &uncertain.id).unwrap();
+        assert_eq!(uncertain.execution_status, "failed");
+        assert_eq!(
+            uncertain.execution_error_code.as_deref(),
+            Some("approval_execution_interrupted")
+        );
+        assert!(
+            !Command::new("git")
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/must-not-replay"
+                ])
+                .current_dir(root.path().join("repository"))
+                .status()
+                .unwrap()
+                .success()
         );
     }
 }

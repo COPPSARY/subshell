@@ -578,6 +578,17 @@ pub(crate) fn get_approval(database: &Database, id: &str) -> Result<ApprovalRequ
     database.connect()?.query_row("SELECT id,project_id,task_id,agent_run_id,action,arguments_json,status,requested_by,created_at,decided_at,execution_status,execution_result_json,execution_error_code,execution_error_message,executed_at FROM approval_requests WHERE id=?1", [id], row_to_approval).optional()?.ok_or_else(|| CommandError::new("approval_not_found", "Approval request was not found"))
 }
 
+pub(crate) fn interrupted_executions(
+    database: &Database,
+) -> Result<Vec<ApprovalRequest>, CommandError> {
+    let connection = database.connect()?;
+    let mut statement = connection.prepare("SELECT id,project_id,task_id,agent_run_id,action,arguments_json,status,requested_by,created_at,decided_at,execution_status,execution_result_json,execution_error_code,execution_error_message,executed_at FROM approval_requests WHERE status='approved' AND execution_status IN('not_started','running') ORDER BY created_at")?;
+    statement
+        .query_map([], row_to_approval)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 fn row_to_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest> {
     let arguments: String = row.get(5)?;
     let result: Option<String> = row.get(11)?;

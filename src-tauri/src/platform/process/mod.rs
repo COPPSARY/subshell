@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -55,6 +55,33 @@ pub struct ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    pub fn identity_is_active(identity: &str) -> bool {
+        let Ok(process_id) = identity.parse::<u32>() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            Command::new("kill")
+                .args(["-0", &process_id.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+        #[cfg(windows)]
+        {
+            Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {process_id}"), "/NH"])
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout)
+                            .split_whitespace()
+                            .any(|field| field == process_id.to_string())
+                })
+        }
+    }
+
     pub fn usage(&self, run_id: &str) -> ProcessUsage {
         let process_id = self
             .handles
@@ -329,6 +356,14 @@ mod tests {
         let (bytes, cursor) = read_log_tail(&log, 4).unwrap();
         assert_eq!(bytes, b"6789");
         assert_eq!(cursor, 10);
+    }
+
+    #[test]
+    fn recognizes_the_current_process_identity() {
+        assert!(ProcessSupervisor::identity_is_active(
+            &std::process::id().to_string()
+        ));
+        assert!(!ProcessSupervisor::identity_is_active("not-a-pid"));
     }
 
     #[test]

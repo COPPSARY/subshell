@@ -1201,13 +1201,24 @@ impl RunService {
                 .collect::<Result<Vec<_>, _>>()?
         };
         let transaction = connection.transaction()?;
+        let mut resumable = Vec::new();
         for (run_id, task_id, project_id, provider_id, process_identity, recoverable) in active {
             if self.processes.is_active(&run_id) {
                 continue;
             }
+            let process_still_running = process_identity
+                .as_deref()
+                .is_some_and(ProcessSupervisor::identity_is_active);
+            let waiting_reason = if process_still_running {
+                "Process is still running but its terminal cannot be reattached; stop it before resuming"
+            } else if recoverable {
+                "Restart detected; resuming the provider session"
+            } else {
+                "Process lost; start a new session"
+            };
             transaction.execute(
-                "UPDATE agent_runs SET status='failed',process_identity=NULL,waiting_reason='Process lost; resume this session or start a new one',ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
-                [&run_id],
+                "UPDATE agent_runs SET status='failed',process_identity=CASE WHEN ?1 THEN process_identity ELSE NULL END,waiting_reason=?2,ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?3",
+                params![process_still_running, waiting_reason, run_id],
             )?;
             timeline::append(
                 &transaction,
@@ -1218,11 +1229,19 @@ impl RunService {
                     provider_id: Some(&provider_id),
                 },
                 "run.process_lost",
-                serde_json::json!({ "to": "failed", "processIdentity": process_identity, "recoverable": recoverable }),
+                serde_json::json!({ "to": "failed", "processIdentity": process_identity, "recoverable": recoverable, "processStillRunning": process_still_running }),
             )?;
             tasks::rollup_in_transaction(&transaction, &task_id)?;
+            if recoverable && !process_still_running {
+                resumable.push(run_id);
+            }
         }
         transaction.commit()?;
+
+        for run_id in resumable {
+            // A failed resume remains an actionable failed Run; startup itself must stay usable.
+            let _ = self.resume(&run_id, Channel::new(|_| Ok(())));
+        }
 
         let connection = self.database.connect()?;
         let projects = {
@@ -1628,6 +1647,20 @@ impl RunService {
                 "Run is already active",
             ));
         }
+        let process_identity = self.database.connect()?.query_row(
+            "SELECT process_identity FROM agent_runs WHERE id=?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        if process_identity
+            .as_deref()
+            .is_some_and(ProcessSupervisor::identity_is_active)
+        {
+            return Err(CommandError::new(
+                "process_still_running",
+                "The previous process is still running; wait for it to finish before resuming",
+            ));
+        }
         if !run.can_resume {
             return Err(CommandError::new(
                 "resume_unsupported",
@@ -1930,12 +1963,19 @@ mod tests {
             data_dir: root.path().join("data"),
         };
         let database = Database::initialize(&paths.data_dir.join("db.sqlite3")).unwrap();
+        let executable = root.path().join("resume-agent");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'after restart\\n'\nsleep 0.2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let profile = GenericProfile {
             id: "claude-account".into(),
             display_name: "Claude fixture".into(),
             provider_type: "claude".into(),
             status: "active".into(),
-            executable_path: std::env::current_exe().unwrap().to_string_lossy().into(),
+            executable_path: executable.to_string_lossy().into(),
             arguments: vec![
                 "--session-id".into(),
                 "{sessionId}".into(),
@@ -1949,14 +1989,18 @@ mod tests {
         };
         providers::save(&profile, &database, &paths).unwrap();
         let worktree = root.path().join("worktree");
+        let live_worktree = root.path().join("live-worktree");
         let log = root.path().join("output.log");
         fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&live_worktree).unwrap();
         fs::write(&log, "before restart\n").unwrap();
         let connection = database.connect().unwrap();
         connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/project','now','now')", []).unwrap();
         connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Task','working','main','abc','now','now')", []).unwrap();
         connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,raw_log_path,process_identity,provider_session_id,created_at,updated_at) VALUES('run','task','claude-account','work','running',?1,'4242','session-1','now','now')", [log.to_string_lossy()]).unwrap();
         connection.execute("INSERT INTO worktrees(id,agent_run_id,path,base_branch,base_revision,state,created_at) VALUES('worktree','run',?1,'main','abc','active','now')", [worktree.to_string_lossy()]).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,raw_log_path,process_identity,provider_session_id,created_at,updated_at) VALUES('live-run','task','claude-account','work','running',?1,?2,'session-2','now','now')", params![root.path().join("live.log").to_string_lossy(), std::process::id().to_string()]).unwrap();
+        connection.execute("INSERT INTO worktrees(id,agent_run_id,path,base_branch,base_revision,state,created_at) VALUES('live-worktree','live-run',?1,'main','abc','active','now')", [live_worktree.to_string_lossy()]).unwrap();
         drop(connection);
 
         let service = RunService::new(
@@ -1971,28 +2015,32 @@ mod tests {
         service.recover_and_dispatch().unwrap();
 
         let run = service.get("run").unwrap().unwrap();
-        assert_eq!(run.status, "failed");
+        assert!(matches!(run.status.as_str(), "running" | "succeeded"));
         assert!(run.can_resume);
+        assert_eq!(run.resume_count, 1);
         assert_eq!(run.worktree_path.as_deref(), worktree.to_str());
         assert_eq!(run.raw_log_path.as_deref(), log.to_str());
-        assert!(
-            run.waiting_reason
-                .as_deref()
-                .unwrap()
-                .contains("Process lost")
-        );
-        let connection = database.connect().unwrap();
+        for _ in 0..50 {
+            if fs::read_to_string(&log).unwrap().contains("after restart") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = fs::read_to_string(&log).unwrap();
+        assert!(output.starts_with("before restart\n"));
+        assert_eq!(output.matches("after restart").count(), 1);
+        assert_eq!(database.connect().unwrap().query_row::<u32, _, _>("SELECT COUNT(*) FROM timeline_events WHERE agent_run_id='run' AND event_type='run.resumed'", [], |row| row.get(0)).unwrap(), 1);
+        let live = service.get("live-run").unwrap().unwrap();
+        assert_eq!(live.status, "failed");
+        assert_eq!(live.resume_count, 0);
+        assert!(live.waiting_reason.unwrap().contains("still running"));
         assert_eq!(
-            connection
-                .query_row::<Option<String>, _, _>(
-                    "SELECT process_identity FROM agent_runs WHERE id='run'",
-                    [],
-                    |row| row.get(0)
-                )
-                .unwrap(),
-            None
+            service
+                .resume("live-run", Channel::new(|_| Ok(())))
+                .unwrap_err()
+                .code,
+            "process_still_running"
         );
-        assert_eq!(connection.query_row::<String, _, _>("SELECT event_type FROM timeline_events WHERE agent_run_id='run' ORDER BY sequence DESC LIMIT 1", [], |row| row.get(0)).unwrap(), "run.process_lost");
     }
 
     #[test]
