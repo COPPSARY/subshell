@@ -38,7 +38,7 @@ fn decide_and_execute(
     processes: &ProcessSupervisor,
 ) -> Result<ApprovalRequest, CommandError> {
     let request = agent_api::decide(database, &input.request_id, &input.decision)?;
-    if request.status != "approved" || !agent_api::claim_execution(&database, &request.id)? {
+    if request.status != "approved" || !agent_api::claim_execution(database, &request.id)? {
         return agent_api::get_approval(database, &request.id);
     }
     let result = execute(&request, database, runs, paths, git, processes);
