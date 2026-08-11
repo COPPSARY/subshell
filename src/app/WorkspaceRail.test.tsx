@@ -46,8 +46,7 @@ it("archives a completed workspace even when its task status is stale", async ()
 
   render(<WorkspaceRail onArchived={archived} onSelect={vi.fn()} project={{ id: "project-1", name: "Repo", path: "/tmp/repo", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }} />);
 
-  fireEvent.contextMenu((await screen.findByText("Fix login")).closest("button")!);
-  fireEvent.click(screen.getByRole("menuitem", { name: "Archive workspace" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Archive workspace Fix login" }));
   await waitFor(() => expect(updateTaskStatus).toHaveBeenCalledWith(task.id, "archived"));
   expect(archived).toHaveBeenCalledWith(task.id);
 });

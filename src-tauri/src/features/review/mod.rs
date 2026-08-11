@@ -733,10 +733,21 @@ fn reviewable_task(database: &Database, task_id: &str) -> Result<tasks::Task, Co
     let task = tasks::get(database, task_id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
     if !matches!(task.status.as_str(), "review" | "approved") {
-        return Err(CommandError::new(
-            "task_not_reviewable",
-            "Task must be ready for review",
-        ));
+        let (implementations, active, failed): (i64, i64, i64) = database.connect()?.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(status IN('queued','preparing','running','waiting')),0),COALESCE(SUM(status IN('failed','cancelled')),0) FROM agent_runs WHERE task_id=?1 AND role<>'planner'",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let message = if implementations == 0 {
+            "Approve the planner's proposed assignments or start an implementation agent first"
+        } else if active > 0 {
+            "Finish the active implementation agents before opening Review"
+        } else if failed > 0 {
+            "Retry failed agents or keep their changes before opening Review"
+        } else {
+            "Every implementation agent must finish before opening Review"
+        };
+        return Err(CommandError::new("task_not_reviewable", message));
     }
     Ok(task)
 }
@@ -820,9 +831,21 @@ mod tests {
         connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/repo','now','now')", []).unwrap();
         connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')", []).unwrap();
         connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Completed work','working','main','base','now','now')", []).unwrap();
-        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,status,merge_order,created_at,updated_at) VALUES('run','task','provider','Implement','implementer','succeeded',0,'now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,status,merge_order,created_at,updated_at) VALUES('run','task','provider','Implement','implementer','running',0,'now','now')", []).unwrap();
         drop(connection);
 
+        assert_eq!(
+            reviewable_task(&database, "task").unwrap_err().message,
+            "Finish the active implementation agents before opening Review"
+        );
+        database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE agent_runs SET status='succeeded' WHERE id='run'",
+                [],
+            )
+            .unwrap();
         assert_eq!(reviewable_task(&database, "task").unwrap().status, "review");
     }
 

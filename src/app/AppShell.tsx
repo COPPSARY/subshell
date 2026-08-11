@@ -5,8 +5,9 @@ import appIconUrl from "../../assets/app-icon.svg";
 import { getHealth } from "../features/health";
 import { listProjects, ProjectsView, restoreProject, type Project } from "../features/projects";
 import { ProvidersView } from "../features/providers";
+import { approveReview, getReview, mergeReview } from "../features/review";
 import { AgentsView, decideQuit } from "../features/runs";
-import { createTask, getTask, listTasks, TasksView, type Task } from "../features/tasks";
+import { createTask, getTask, listTasks, TasksView, updateTaskStatus, type Task } from "../features/tasks";
 import { TimelineView } from "../features/timeline";
 import { destinations, type DestinationName } from "./navigation";
 import { WorkspaceRail } from "./WorkspaceRail";
@@ -24,6 +25,7 @@ export function AppShell() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [quitActiveRuns, setQuitActiveRuns] = useState<number | null>(null);
   const [commandsOpen, setCommandsOpen] = useState(false);
+  const [commandError, setCommandError] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -68,7 +70,18 @@ export function AppShell() {
     }
     setSelectedTask(task); setSelectedRunId(runId ?? null); setActive("Tasks");
   }
-  const commands = useMemo<AppCommand[]>(() => destinations.map((destination) => ({ id: `open-${destination.name.toLowerCase()}`, label: `Open ${destination.name}`, detail: destination.name === "Projects" ? "Open a repository or start a goal" : `Go to the ${destination.name.toLowerCase()} workspace`, run: () => setActive(destination.name) })), []);
+  function runCommand(action: () => Promise<void>) { setCommandError(""); void action().catch((reason) => setCommandError(errorMessage(reason))); }
+  async function refreshSelected(taskId: string) { const task = await getTask(taskId); setSelectedTask(task); setTasks((items) => items.map((item) => item.id === task.id ? task : item)); setActive("Tasks"); }
+  const commands = useMemo<AppCommand[]>(() => {
+    const items = destinations.map((destination) => ({ id: `open-${destination.name.toLowerCase()}`, label: `Open ${destination.name}`, detail: destination.name === "Projects" ? "Open a repository or start a goal" : `Go to the ${destination.name.toLowerCase()} workspace`, run: () => setActive(destination.name) }));
+    items.unshift({ id: "new-goal", label: "Start a new goal", detail: "Open the quick goal composer", run: () => setActive("Projects") });
+    if (!selectedTask) return items;
+    items.push({ id: "open-current-task", label: "Open current task", detail: selectedTask.title, run: () => setActive("Tasks") });
+    if (selectedTask.status === "review") items.push({ id: "approve-current-review", label: "Approve current review", detail: "Approve the exact assembled diff", run: () => runCommand(async () => { const review = await getReview(selectedTask.id); await approveReview(review.id, review.fingerprint); await refreshSelected(selectedTask.id); }) });
+    if (selectedTask.status === "approved") items.push({ id: "merge-current-review", label: "Merge current review", detail: "Run validation and merge the exact approval", run: () => runCommand(async () => { const review = await getReview(selectedTask.id); await mergeReview(review.id, review.fingerprint); await refreshSelected(selectedTask.id); }) });
+    items.push({ id: "archive-current-task", label: "Archive current workspace", detail: "Available after all agents stop", run: () => runCommand(async () => { await updateTaskStatus(selectedTask.id, "archived"); setTasks((values) => values.filter((task) => task.id !== selectedTask.id)); setSelectedTask(null); setSelectedRunId(null); setActive("Tasks"); }) });
+    return items;
+  }, [selectedTask?.id, selectedTask?.status, selectedTask?.title]);
   const activeView = active === "Projects"
     ? <ProjectsView selectedProject={project} onSelect={(nextProject) => { if (nextProject.id !== project?.id) { setSelectedTask(null); setSelectedRunId(null); setAutoStartTaskId(null); } setProject(nextProject); }} onStartGoal={startGoal} />
     : active === "Workspace"
@@ -112,6 +125,7 @@ export function AppShell() {
           </nav>
         </header>
         <section className="h-[calc(100vh-3rem)] min-h-0 overflow-auto" aria-live="polite">
+          {commandError && <p className="error-banner fixed bottom-4 right-4 z-40 max-w-md" role="alert">{commandError}</p>}
           {activeView}
         </section>
       </main>
@@ -120,3 +134,5 @@ export function AppShell() {
     </div>
   );
 }
+
+function errorMessage(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : String(error); }

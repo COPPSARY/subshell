@@ -211,7 +211,7 @@ pub(crate) fn update_status(
             format!("Task cannot move from {current} to {status}"),
         ));
     }
-    let active_runs: i64 = connection.query_row("SELECT COUNT(*) FROM agent_runs WHERE task_id=?1 AND status IN ('queued','preparing','running')", [id], |row| row.get(0))?;
+    let active_runs: i64 = connection.query_row("SELECT COUNT(*) FROM agent_runs WHERE task_id=?1 AND status IN ('queued','preparing','running','waiting')", [id], |row| row.get(0))?;
     if active_runs > 0 && !matches!(status, "working" | "waiting") {
         return Err(CommandError::new(
             "task_has_active_runs",
@@ -449,6 +449,19 @@ mod tests {
             update_status(&db, &task.id, "working").unwrap().status,
             "working"
         );
+        let connection = db.connect().unwrap();
+        connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Provider','/tmp/provider','active','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,created_at,updated_at) VALUES('run',?1,'provider','Wait','waiting','now','now')", [&task.id]).unwrap();
+        assert_eq!(
+            update_status(&db, &task.id, "archived").unwrap_err().code,
+            "task_has_active_runs"
+        );
+        connection
+            .execute(
+                "UPDATE agent_runs SET status='succeeded' WHERE id='run'",
+                [],
+            )
+            .unwrap();
         assert_eq!(
             update_status(&db, &task.id, "archived").unwrap().status,
             "archived"

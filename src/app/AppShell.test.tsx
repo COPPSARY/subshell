@@ -52,6 +52,15 @@ describe("AppShell", () => {
     expect(screen.getByRole("button", { name: "Tasks" })).toBeTruthy();
   });
 
+  it("exposes the core workflow through the keyboard command palette", async () => {
+    render(<AppShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const command = await screen.findByRole("option", { name: /Start a new goal/ });
+    fireEvent.click(command);
+    expect(await screen.findByRole("heading", { name: "Open your first project" })).toBeTruthy();
+  });
+
   it("asks for a safe decision instead of closing over active runs", async () => {
     render(<AppShell />);
     await waitFor(() => expect(eventMocks.listen).toHaveBeenCalled());
