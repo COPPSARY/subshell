@@ -347,11 +347,11 @@ pub fn runs_resources(
 }
 
 #[tauri::command]
-pub fn runs_decide_quit(
+pub fn runs_decide_quit<R: tauri::Runtime>(
     input: QuitInput,
     service: State<RunService>,
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
+    app: tauri::AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
 ) -> Result<(), CommandError> {
     match input.decision.as_str() {
         "preserve" => window.minimize().map_err(tauri_error),

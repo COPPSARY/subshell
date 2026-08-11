@@ -818,10 +818,37 @@ fn io_error(error: std::io::Error) -> CommandError {
 mod tests {
     use super::*;
     use crate::{
-        features::{agent_api, context_sharing},
-        platform::process::{ProcessSpec, ProcessSupervisor},
+        features::{context::ContextDrafts, runs::RunService},
+        platform::{
+            environment::PortLeases,
+            keychain::MemorySecretStore,
+            process::{ProcessSpec, ProcessSupervisor},
+        },
     };
     use std::{process::Command, sync::Arc};
+    use tauri::webview::InvokeRequest;
+
+    fn invoke(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        command: &str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        tauri::test::get_ipc_response(
+            webview,
+            InvokeRequest {
+                cmd: command.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({"input": input})),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.into(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("{command} failed: {error}"))
+        .deserialize()
+        .unwrap()
+    }
 
     #[test]
     fn completed_runs_reconcile_a_stale_task_before_review() {
@@ -967,59 +994,85 @@ mod tests {
                 Arc::new(|_| {}),
             )
             .unwrap();
-        let share_input = context_sharing::SharePreviewInput {
-            source_run_id: None,
-            target_run_id: "run-1".into(),
-            kind: "summary".into(),
-            content_reference: None,
-            summary: "Use the shared authentication contract".into(),
-        };
-        let share = context_sharing::preview(&database, &share_input).unwrap();
-        let delivered = context_sharing::deliver(
-            &database,
-            &processes,
-            context_sharing::ShareDeliverInput {
-                source_run_id: None,
-                target_run_id: "run-1".into(),
-                kind: "summary".into(),
-                content_reference: None,
-                content: share.content,
-                preview_sha256: share.sha256,
-            },
-        )
-        .unwrap();
-        assert_eq!(delivered.delivery_status, "delivered");
+        let runs = RunService::new(
+            database.clone(),
+            paths.clone(),
+            git.clone(),
+            ContextDrafts::default(),
+            processes.clone(),
+            PortLeases::default(),
+            Arc::new(MemorySecretStore::default()),
+        );
+        let app = crate::app::configure(tauri::test::mock_builder())
+            .manage(database.clone())
+            .manage(paths.clone())
+            .manage(git.clone())
+            .manage(processes.clone())
+            .manage(runs)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let share = invoke(
+            &webview,
+            "context_share_preview",
+            serde_json::json!({
+                "sourceRunId": null,
+                "targetRunId": "run-1",
+                "kind": "summary",
+                "contentReference": null,
+                "summary": "Use the shared authentication contract"
+            }),
+        );
+        let delivered = invoke(
+            &webview,
+            "context_share_deliver",
+            serde_json::json!({
+                "sourceRunId": null,
+                "targetRunId": "run-1",
+                "kind": "summary",
+                "contentReference": null,
+                "content": share["content"],
+                "previewSha256": share["sha256"]
+            }),
+        );
+        assert_eq!(delivered["deliveryStatus"], "delivered");
         processes.stop("run-1").unwrap();
 
-        let denied = agent_api::request(
-            &database,
-            agent_api::RequestInput {
-                run_id: "run-0".into(),
-                action: "create_branch".into(),
-                arguments: serde_json::json!({"name":"unsafe"}),
-            },
-        )
-        .unwrap();
+        let denied = invoke(
+            &webview,
+            "workspace_request_action",
+            serde_json::json!({
+                "runId": "run-0",
+                "action": "create_branch",
+                "arguments": {"name":"unsafe"}
+            }),
+        );
         assert_eq!(
-            agent_api::decide(&database, &denied.id, "denied")
-                .unwrap()
-                .status,
+            invoke(
+                &webview,
+                "workspace_decide_action",
+                serde_json::json!({"requestId":denied["id"],"decision":"denied"})
+            )["status"],
             "denied"
         );
-        let approved_branch = agent_api::request(
-            &database,
-            agent_api::RequestInput {
-                run_id: "run-0".into(),
-                action: "create_branch".into(),
-                arguments: serde_json::json!({"name":"safe"}),
-            },
-        )
-        .unwrap();
+        let approved_branch = invoke(
+            &webview,
+            "workspace_request_action",
+            serde_json::json!({
+                "runId": "run-0",
+                "action": "create_branch",
+                "arguments": {"name":"approved/safe"}
+            }),
+        );
         assert_eq!(
-            agent_api::decide(&database, &approved_branch.id, "approved")
-                .unwrap()
-                .status,
-            "approved"
+            invoke(
+                &webview,
+                "workspace_decide_action",
+                serde_json::json!({"requestId":approved_branch["id"],"decision":"approved"})
+            )["executionStatus"],
+            "succeeded"
         );
         connection.execute("UPDATE agent_runs SET status='succeeded',ended_at='now',updated_at='now' WHERE task_id='task'", []).unwrap();
         connection
@@ -1029,35 +1082,35 @@ mod tests {
             )
             .unwrap();
 
-        let pending = get_or_create("task", &database, &paths, &git).unwrap();
-        assert_eq!(pending.runs.len(), 2);
+        let pending = invoke(&webview, "review_get", serde_json::json!({"taskId":"task"}));
+        assert_eq!(pending["runs"].as_array().unwrap().len(), 2);
         assert!(
-            pending
-                .conflicts
+            pending["conflicts"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .any(|flag| flag.category == "related_file")
+                .any(|flag| flag["category"] == "related_file")
         );
-        let approved = decide(
-            ReviewDecisionInput {
-                attempt_id: pending.id.clone(),
-                fingerprint: pending.fingerprint.clone(),
-                feedback: String::new(),
-            },
-            "approved",
-            &database,
-            &git,
+        let approved = invoke(
+            &webview,
+            "review_approve",
+            serde_json::json!({
+                "attemptId":pending["id"],
+                "fingerprint":pending["fingerprint"],
+                "feedback":""
+            }),
+        );
+        let revision = invoke(
+            &webview,
+            "review_merge",
+            serde_json::json!({
+                "attemptId":approved["id"],
+                "fingerprint":approved["fingerprint"]
+            }),
         )
-        .unwrap();
-        let revision = merge(
-            MergeInput {
-                attempt_id: approved.id,
-                fingerprint: approved.fingerprint,
-            },
-            &database,
-            &paths,
-            &git,
-        )
-        .unwrap();
+        .as_str()
+        .unwrap()
+        .to_string();
 
         assert_eq!(
             git.status(&repository).unwrap().revision.as_deref(),
@@ -1085,13 +1138,25 @@ mod tests {
         );
         assert!(worktrees.iter().all(|worktree| !worktree.exists()));
         assert_eq!(database.connect().unwrap().query_row::<i64, _, _>("SELECT COUNT(*) FROM worktrees WHERE state='merged' AND cleaned_at IS NOT NULL", [], |row| row.get(0)).unwrap(), 2);
+        drop(webview);
+        drop(app);
         drop(connection);
         drop(database);
         let reopened = Database::initialize(&paths.data_dir.join("db.sqlite3")).unwrap();
-        assert_eq!(
-            tasks::get(&reopened, "task").unwrap().unwrap().status,
-            "archived"
+        let relaunched = crate::app::configure(tauri::test::mock_builder())
+            .manage(reopened.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let relaunched_webview =
+            tauri::WebviewWindowBuilder::new(&relaunched, "main", Default::default())
+                .build()
+                .unwrap();
+        let archived = invoke(
+            &relaunched_webview,
+            "tasks_list_archived",
+            serde_json::json!({"projectId":"project"}),
         );
+        assert_eq!(archived["items"][0]["status"], "archived");
         assert!(reopened.connect().unwrap().query_row::<i64, _, _>("SELECT COUNT(*) FROM timeline_events WHERE project_id='project' AND event_type IN('context.shared','approval.denied','approval.approved','merge.succeeded')", [], |row| row.get(0)).unwrap() >= 4);
     }
 }

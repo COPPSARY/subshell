@@ -22,7 +22,7 @@ use crate::{
 };
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = data_dir(app)?;
@@ -63,7 +63,14 @@ pub fn run() {
             app.manage(processes);
             app.manage(secrets);
             Ok(())
-        })
+        });
+    configure(builder)
+        .run(tauri::generate_context!())
+        .expect("failed to run SubShell");
+}
+
+pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
         .invoke_handler(tauri::generate_handler![
             health::health_status,
             projects::projects_open,
@@ -154,11 +161,9 @@ pub fn run() {
                 let _ = window.emit("runs-quit-requested", active_runs);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("failed to run SubShell");
 }
 
-fn data_dir(app: &tauri::App) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn data_dir<R: tauri::Runtime>(app: &tauri::App<R>) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(path) = std::env::var_os("SUBSHELL_DATA_DIR") {
         return Ok(path.into());
     }
