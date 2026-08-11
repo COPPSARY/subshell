@@ -12,7 +12,11 @@ use uuid::Uuid;
 
 use crate::{
     contracts::{CommandError, Page},
-    platform::{database::Database, environment::RuntimePaths},
+    platform::{
+        database::Database,
+        environment::RuntimePaths,
+        keychain::{SecretStore, SystemSecretStore},
+    },
 };
 
 const KNOWN_PROVIDERS: [(&str, &str, &[&str], &[&str]); 3] = [
@@ -32,6 +36,10 @@ pub struct GenericProfile {
     #[serde(default)]
     pub id: String,
     pub display_name: String,
+    #[serde(default = "generic_provider_type")]
+    pub provider_type: String,
+    #[serde(default = "active_status")]
+    pub status: String,
     pub executable_path: String,
     #[serde(default)]
     pub arguments: Vec<String>,
@@ -61,6 +69,7 @@ pub struct ResolvedProvider {
     pub config_source_path: Option<String>,
     pub config_root_env_var: Option<String>,
     pub inherit_user_home: bool,
+    pub provider_type: String,
     executable_path: String,
     arguments: Vec<String>,
     resume_arguments: Vec<String>,
@@ -68,6 +77,15 @@ pub struct ResolvedProvider {
 }
 
 impl ResolvedProvider {
+    pub fn secret_environment_key(&self) -> Option<&'static str> {
+        match self.provider_type.as_str() {
+            "claude" => Some("ANTHROPIC_API_KEY"),
+            "codex" => Some("OPENAI_API_KEY"),
+            "gemini" => Some("GEMINI_API_KEY"),
+            _ => None,
+        }
+    }
+
     pub fn new_session_id(&self) -> Option<String> {
         self.arguments
             .iter()
@@ -183,6 +201,13 @@ pub struct ProfileId {
     pub id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSecretInput {
+    pub id: String,
+    pub secret: String,
+}
+
 #[tauri::command]
 pub fn providers_create_generic(
     mut input: GenericProfile,
@@ -203,9 +228,22 @@ pub fn providers_update_generic(
     Ok(input)
 }
 #[tauri::command]
-pub fn providers_remove(input: ProfileId, database: State<Database>) -> Result<(), CommandError> {
-    database.connect()?.execute("UPDATE provider_accounts SET status='revoked',removed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",[input.id])?;
-    Ok(())
+pub fn providers_remove(
+    input: ProfileId,
+    database: State<Database>,
+    secrets: State<SystemSecretStore>,
+) -> Result<(), CommandError> {
+    remove(&database, &*secrets, &input.id)
+}
+
+#[tauri::command]
+pub fn providers_reauthenticate(
+    input: ProviderSecretInput,
+    database: State<Database>,
+    secrets: State<SystemSecretStore>,
+) -> Result<GenericProfile, CommandError> {
+    reauthenticate(&database, &*secrets, &input.id, &input.secret)?;
+    get(&database, &input.id)
 }
 #[tauri::command]
 pub fn providers_list(database: State<Database>) -> Result<Page<GenericProfile>, CommandError> {
@@ -233,7 +271,7 @@ pub(crate) fn save(
             .into_owned()
     });
     fs::create_dir_all(&scope).map_err(io_error)?;
-    connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at,removed_at) VALUES(?1,'generic',?2,?3,'active',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),NULL) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,config_scope_path=excluded.config_scope_path,status='active',updated_at=excluded.updated_at,removed_at=NULL",params![profile.id,profile.display_name,scope])?;
+    connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at,removed_at) VALUES(?1,?2,?3,?4,'active',strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),NULL) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,display_name=excluded.display_name,config_scope_path=excluded.config_scope_path,status='active',updated_at=excluded.updated_at,removed_at=NULL",params![profile.id,profile.provider_type,profile.display_name,scope])?;
     connection.execute("INSERT INTO generic_provider_profiles(provider_account_id,executable_path,arguments_json,resume_arguments_json,prompt_mode,config_root_env_var,inherit_user_home) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(provider_account_id) DO UPDATE SET executable_path=excluded.executable_path,arguments_json=excluded.arguments_json,resume_arguments_json=excluded.resume_arguments_json,prompt_mode=excluded.prompt_mode,config_root_env_var=excluded.config_root_env_var,inherit_user_home=excluded.inherit_user_home",params![profile.id,profile.executable_path,serde_json::to_string(&profile.arguments).unwrap(),serde_json::to_string(&profile.resume_arguments).unwrap(),profile.prompt_mode,profile.config_root_env_var,profile.inherit_user_home])?;
     Ok(())
 }
@@ -347,8 +385,15 @@ pub fn get(database: &Database, id: &str) -> Result<GenericProfile, CommandError
 
 pub fn resolve(database: &Database, id: &str) -> Result<ResolvedProvider, CommandError> {
     let profile = get(database, id)?;
+    if profile.status != "active" {
+        return Err(CommandError::new(
+            "provider_reauth_required",
+            "Provider account requires reauthentication before starting a run",
+        ));
+    }
     Ok(ResolvedProvider {
         id: profile.id,
+        provider_type: profile.provider_type,
         executable_path: profile.executable_path,
         arguments: profile.arguments,
         resume_arguments: profile.resume_arguments,
@@ -360,24 +405,94 @@ pub fn resolve(database: &Database, id: &str) -> Result<ResolvedProvider, Comman
 }
 pub(crate) fn list(database: &Database) -> Result<Vec<GenericProfile>, CommandError> {
     let connection = database.connect()?;
-    let mut statement=connection.prepare("SELECT a.id,a.display_name,g.executable_path,g.arguments_json,g.resume_arguments_json,g.prompt_mode,g.config_root_env_var,a.config_scope_path,g.inherit_user_home FROM provider_accounts a JOIN generic_provider_profiles g ON g.provider_account_id=a.id WHERE a.removed_at IS NULL ORDER BY a.display_name")?;
+    let mut statement=connection.prepare("SELECT a.id,a.display_name,a.provider_type,a.status,g.executable_path,g.arguments_json,g.resume_arguments_json,g.prompt_mode,g.config_root_env_var,a.config_scope_path,g.inherit_user_home FROM provider_accounts a JOIN generic_provider_profiles g ON g.provider_account_id=a.id WHERE a.removed_at IS NULL ORDER BY a.display_name")?;
     statement
         .query_map([], |row| {
             Ok(GenericProfile {
                 id: row.get(0)?,
                 display_name: row.get(1)?,
-                executable_path: row.get(2)?,
-                arguments: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
-                resume_arguments: serde_json::from_str(&row.get::<_, String>(4)?)
+                provider_type: row.get(2)?,
+                status: row.get(3)?,
+                executable_path: row.get(4)?,
+                arguments: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
+                resume_arguments: serde_json::from_str(&row.get::<_, String>(6)?)
                     .unwrap_or_default(),
-                prompt_mode: row.get(5)?,
-                config_root_env_var: row.get(6)?,
-                config_source_path: row.get(7)?,
-                inherit_user_home: row.get(8)?,
+                prompt_mode: row.get(7)?,
+                config_root_env_var: row.get(8)?,
+                config_source_path: row.get(9)?,
+                inherit_user_home: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn reauthenticate(
+    database: &Database,
+    secrets: &dyn SecretStore,
+    account_id: &str,
+    secret: &str,
+) -> Result<(), CommandError> {
+    if secret.is_empty() {
+        return Err(CommandError::new(
+            "invalid_secret",
+            "Credential is required",
+        ));
+    }
+    let connection = database.connect()?;
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM provider_accounts WHERE id=?1 AND removed_at IS NULL)",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(CommandError::new(
+            "provider_not_found",
+            "Provider account was not found",
+        ));
+    }
+    secrets.set(account_id, secret.as_bytes())?;
+    connection.execute(
+        "UPDATE provider_accounts SET status='active',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+        [account_id],
+    )?;
+    Ok(())
+}
+
+fn remove(
+    database: &Database,
+    secrets: &dyn SecretStore,
+    account_id: &str,
+) -> Result<(), CommandError> {
+    let connection = database.connect()?;
+    let active: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE provider_account_id=?1 AND status IN('queued','preparing','running','waiting'))",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    if active {
+        return Err(CommandError::new(
+            "provider_account_in_use",
+            "Stop active runs before removing this provider account",
+        ));
+    }
+    secrets.delete(account_id)?;
+    let changed = connection.execute("UPDATE provider_accounts SET status='revoked',removed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND removed_at IS NULL",[account_id])?;
+    if changed == 0 {
+        return Err(CommandError::new(
+            "provider_not_found",
+            "Provider account was not found",
+        ));
+    }
+    Ok(())
+}
+
+fn generic_provider_type() -> String {
+    "generic".into()
+}
+
+fn active_status() -> String {
+    "active".into()
 }
 
 fn detect(database: &Database) -> Result<Vec<DetectedProvider>, CommandError> {
@@ -457,6 +572,7 @@ fn io_error(error: std::io::Error) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::keychain::MemorySecretStore;
     use tempfile::tempdir;
     #[test]
     fn prompt_is_a_single_argv_token_not_a_shell() {
@@ -465,6 +581,8 @@ mod tests {
         let p = GenericProfile {
             id: "p".into(),
             display_name: "P".into(),
+            provider_type: "generic".into(),
+            status: "active".into(),
             executable_path: exe.to_string_lossy().into(),
             arguments: vec!["--prompt".into(), "{prompt}".into()],
             resume_arguments: vec![],
@@ -476,6 +594,7 @@ mod tests {
         validate(&p).unwrap();
         let resolved = ResolvedProvider {
             id: p.id,
+            provider_type: p.provider_type,
             executable_path: p.executable_path,
             arguments: p.arguments,
             resume_arguments: p.resume_arguments,
@@ -514,6 +633,7 @@ mod tests {
         let root = tempdir().unwrap();
         let resolved = ResolvedProvider {
             id: "claude".into(),
+            provider_type: "claude".into(),
             executable_path: "/usr/bin/claude".into(),
             arguments: vec![
                 "--session-id".into(),
@@ -551,6 +671,7 @@ mod tests {
         ] {
             let resolved = ResolvedProvider {
                 id: executable.into(),
+                provider_type: "generic".into(),
                 executable_path: executable.into(),
                 arguments: vec!["{prompt}".into()],
                 resume_arguments: vec!["resume".into()],
@@ -566,5 +687,68 @@ mod tests {
             assert_eq!(launch.first().map(String::as_str), Some(expected));
             assert_eq!(resume.first().map(String::as_str), Some(expected));
         }
+    }
+
+    #[test]
+    fn account_secrets_stay_out_of_sqlite_and_live_runs_block_removal() {
+        let root = tempdir().unwrap();
+        let database_path = root.path().join("db.sqlite3");
+        let database = Database::initialize(&database_path).unwrap();
+        let paths = RuntimePaths {
+            data_dir: root.path().join("data"),
+        };
+        let profile = GenericProfile {
+            id: "account".into(),
+            display_name: "Claude account".into(),
+            provider_type: "claude".into(),
+            status: "active".into(),
+            executable_path: std::env::current_exe().unwrap().to_string_lossy().into(),
+            arguments: vec!["{prompt}".into()],
+            resume_arguments: vec![],
+            prompt_mode: "argument".into(),
+            config_root_env_var: Some("CLAUDE_CONFIG_DIR".into()),
+            config_source_path: None,
+            inherit_user_home: false,
+        };
+        save(&profile, &database, &paths).unwrap();
+        database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE provider_accounts SET status='needs_reauth' WHERE id='account'",
+                [],
+            )
+            .unwrap();
+        let secrets = MemorySecretStore::default();
+        reauthenticate(&database, &secrets, "account", "secret-marker").unwrap();
+        assert_eq!(
+            secrets.get("account").unwrap(),
+            Some(b"secret-marker".to_vec())
+        );
+        assert_eq!(get(&database, "account").unwrap().status, "active");
+        assert!(
+            !String::from_utf8_lossy(&fs::read(&database_path).unwrap()).contains("secret-marker")
+        );
+
+        let connection = database.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/project','now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Task','working','main','abc','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,created_at,updated_at) VALUES('run','task','account','work','running','now','now')", []).unwrap();
+        let error = remove(&database, &secrets, "account").unwrap_err();
+        assert_eq!(error.code, "provider_account_in_use");
+        assert!(secrets.get("account").unwrap().is_some());
+        connection
+            .execute(
+                "UPDATE agent_runs SET status='succeeded' WHERE id='run'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        remove(&database, &secrets, "account").unwrap();
+        assert_eq!(secrets.get("account").unwrap(), None);
+        assert_eq!(
+            get(&database, "account").unwrap_err().code,
+            "provider_not_found"
+        );
     }
 }

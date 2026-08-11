@@ -382,6 +382,7 @@ impl PreviewService {
                 environment: child_environment(&command.environment),
                 log_path,
                 stdin: None,
+                redactions: vec![],
             },
             sink,
         ) {

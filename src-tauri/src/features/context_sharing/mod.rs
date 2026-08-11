@@ -375,6 +375,7 @@ mod tests {
                     environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
                     log_path: root.path().join("output.log"),
                     stdin: None,
+                    redactions: vec![],
                 },
                 Arc::new(|_: ProcessNotice| {}),
             )

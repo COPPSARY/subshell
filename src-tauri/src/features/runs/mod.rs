@@ -21,6 +21,7 @@ use crate::{
         database::Database,
         environment::{self, PortLeases, RuntimePaths},
         git::{GitDiff, GitService},
+        keychain::SecretStore,
         process::{self, ProcessNotice, ProcessSpec, ProcessSupervisor},
     },
 };
@@ -33,6 +34,7 @@ pub struct RunService {
     drafts: ContextDrafts,
     processes: ProcessSupervisor,
     ports: PortLeases,
+    secrets: Arc<dyn SecretStore>,
 }
 impl RunService {
     pub fn new(
@@ -42,6 +44,7 @@ impl RunService {
         drafts: ContextDrafts,
         processes: ProcessSupervisor,
         ports: PortLeases,
+        secrets: Arc<dyn SecretStore>,
     ) -> Self {
         Self {
             database,
@@ -50,6 +53,7 @@ impl RunService {
             drafts,
             processes,
             ports,
+            secrets,
         }
     }
 }
@@ -992,6 +996,19 @@ impl RunService {
         if let Some(name) = &run.provider.config_root_env_var {
             environment.push((name.clone(), run.config_root.to_string_lossy().into()));
         }
+        let mut redactions = Vec::new();
+        if let Some(name) = run.provider.secret_environment_key()
+            && let Some(secret) = self.secrets.get(&run.provider.id)?
+        {
+            let value = String::from_utf8(secret.clone()).map_err(|_| {
+                CommandError::new(
+                    "invalid_provider_secret",
+                    "Provider credential is not UTF-8",
+                )
+            })?;
+            environment.push((name.into(), value));
+            redactions.push(secret);
+        }
         let database = self.database.clone();
         let ports = self.ports.clone();
         let run_id = run.run_id.clone();
@@ -1084,6 +1101,7 @@ impl RunService {
                     bytes.push(b'\n');
                     bytes
                 }),
+                redactions,
             },
             sink,
         ) {
@@ -1514,6 +1532,8 @@ mod tests {
         let profile = GenericProfile {
             id: "stand-in".into(),
             display_name: "Stand-in".into(),
+            provider_type: "generic".into(),
+            status: "active".into(),
             executable_path: executable.to_string_lossy().into(),
             arguments: vec!["start".into(), "{sessionId}".into(), "{prompt}".into()],
             resume_arguments: vec!["resume".into(), "{sessionId}".into()],
@@ -1569,6 +1589,7 @@ mod tests {
             drafts.clone(),
             ProcessSupervisor::default(),
             PortLeases::default(),
+            Arc::new(crate::platform::keychain::MemorySecretStore::default()),
         );
         let assignment = |preview: context::ContextPreview| Assignment {
             provider_id: profile.id.clone(),

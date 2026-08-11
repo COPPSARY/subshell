@@ -22,6 +22,7 @@ pub struct ProcessSpec {
     pub environment: Vec<(String, String)>,
     pub log_path: PathBuf,
     pub stdin: Option<Vec<u8>>,
+    pub redactions: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -99,18 +100,33 @@ impl ProcessSupervisor {
         let read_sink = sink.clone();
         let read_log = log.clone();
         let read_cursor = cursor.clone();
+        let mut redactor = Redactor::new(spec.redactions);
         let reader_thread = thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             while let Ok(count) = reader.read(&mut buffer) {
                 if count == 0 {
                     break;
                 }
-                let bytes = buffer[..count].to_vec();
+                let bytes = redactor.push(&buffer[..count], false);
+                if bytes.is_empty() {
+                    continue;
+                }
                 if let Ok(mut file) = read_log.lock() {
                     let _ = file.write_all(&bytes);
                     let _ = file.flush();
                 }
-                let end = read_cursor.fetch_add(count as u64, Ordering::SeqCst) + count as u64;
+                let end = read_cursor.fetch_add(bytes.len() as u64, Ordering::SeqCst)
+                    + bytes.len() as u64;
+                read_sink(ProcessNotice::Output { bytes, cursor: end });
+            }
+            let bytes = redactor.push(&[], true);
+            if !bytes.is_empty() {
+                if let Ok(mut file) = read_log.lock() {
+                    let _ = file.write_all(&bytes);
+                    let _ = file.flush();
+                }
+                let end = read_cursor.fetch_add(bytes.len() as u64, Ordering::SeqCst)
+                    + bytes.len() as u64;
                 read_sink(ProcessNotice::Output { bytes, cursor: end });
             }
         });
@@ -164,6 +180,55 @@ impl ProcessSupervisor {
             .get_mut(run_id)
             .ok_or_else(|| CommandError::new("run_not_active", "Run is no longer active"))?;
         handle.killer.kill().map_err(io_error)
+    }
+}
+
+struct Redactor {
+    patterns: Vec<Vec<u8>>,
+    pending: Vec<u8>,
+}
+
+impl Redactor {
+    fn new(patterns: Vec<Vec<u8>>) -> Self {
+        Self {
+            patterns: patterns
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect(),
+            pending: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], finish: bool) -> Vec<u8> {
+        if self.patterns.is_empty() {
+            return bytes.to_vec();
+        }
+        self.pending.extend_from_slice(bytes);
+        let mut output = Vec::new();
+        let mut index = 0;
+        while index < self.pending.len() {
+            if let Some(pattern) = self
+                .patterns
+                .iter()
+                .find(|pattern| self.pending[index..].starts_with(pattern))
+            {
+                output.extend_from_slice(b"[REDACTED]");
+                index += pattern.len();
+                continue;
+            }
+            if !finish
+                && self.patterns.iter().any(|pattern| {
+                    pattern.starts_with(&self.pending[index..])
+                        && self.pending.len() - index < pattern.len()
+                })
+            {
+                break;
+            }
+            output.push(self.pending[index]);
+            index += 1;
+        }
+        self.pending.drain(..index);
+        output
     }
 }
 
@@ -234,6 +299,7 @@ mod tests {
                     environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
                     log_path: log.clone(),
                     stdin: None,
+                    redactions: vec![],
                 },
                 Arc::new(move |event| {
                     tx.send(event).unwrap();
@@ -278,6 +344,7 @@ mod tests {
                         environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
                         log_path: log.clone(),
                         stdin: None,
+                        redactions: vec![],
                     },
                     Arc::new(move |event| {
                         tx.send(event).unwrap();
@@ -290,5 +357,13 @@ mod tests {
             ) {}
         }
         assert_eq!(fs::read_to_string(log).unwrap().matches("turn").count(), 2);
+    }
+
+    #[test]
+    fn redacts_secrets_split_across_output_chunks() {
+        let mut redactor = Redactor::new(vec![b"secret-marker".to_vec()]);
+        assert_eq!(redactor.push(b"before secret-", false), b"before ");
+        assert_eq!(redactor.push(b"marker after", false), b"[REDACTED] after");
+        assert!(redactor.push(&[], true).is_empty());
     }
 }

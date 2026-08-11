@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use tauri::Manager;
 
@@ -16,6 +16,7 @@ use crate::{
         database::Database,
         environment::{PortLeases, RuntimePaths},
         git::GitService,
+        keychain::SystemSecretStore,
         process::ProcessSupervisor,
     },
 };
@@ -31,6 +32,7 @@ pub fn run() {
             let drafts = ContextDrafts::default();
             let processes = ProcessSupervisor::default();
             let ports = PortLeases::default();
+            let secrets = SystemSecretStore;
             let preview_service = PreviewService::new(
                 database.clone(),
                 paths.clone(),
@@ -45,6 +47,7 @@ pub fn run() {
                 drafts.clone(),
                 processes.clone(),
                 ports,
+                Arc::new(secrets.clone()),
             );
             run_service
                 .recover_and_dispatch()
@@ -56,6 +59,7 @@ pub fn run() {
             app.manage(git);
             app.manage(drafts);
             app.manage(processes);
+            app.manage(secrets);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -68,6 +72,7 @@ pub fn run() {
             providers::providers_create_generic,
             providers::providers_update_generic,
             providers::providers_remove,
+            providers::providers_reauthenticate,
             providers::providers_list,
             providers::providers_detect,
             preview::preview_prepare,
