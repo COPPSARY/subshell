@@ -60,6 +60,8 @@ pub struct PlanAssignment {
     pub role: String,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,7 +343,7 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
         }
         if !matches!(
             assignment.role.as_str(),
-            "executor" | "research" | "test" | "reviewer"
+            "executor" | "implementer" | "research" | "test" | "tester" | "reviewer" | "debugger"
         ) {
             return Err(CommandError::new(
                 "invalid_run_role",
@@ -365,6 +367,7 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
             ));
         }
     }
+    validate_dependencies(&input.assignments)?;
     let mut connection = database.connect()?;
     let (task_id, project_id, role, status): (String, String, String, String) = connection
         .query_row(
@@ -409,8 +412,8 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
     )?;
     for (position, assignment) in input.assignments.iter().enumerate() {
         transaction.execute(
-            "INSERT INTO task_plan_assignments(id,plan_id,title,instruction,role,allowed_paths_json,depends_on_json,position) VALUES(?1,?2,?3,?4,?5,?6,'[]',?7)",
-            params![Uuid::new_v4().to_string(), plan_id, assignment.title.trim(), assignment.instruction.trim(), assignment.role, serde_json::to_string(&assignment.allowed_paths).unwrap(), position as i64],
+            "INSERT INTO task_plan_assignments(id,plan_id,title,instruction,role,allowed_paths_json,depends_on_json,position) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![Uuid::new_v4().to_string(), plan_id, assignment.title.trim(), assignment.instruction.trim(), assignment.role, serde_json::to_string(&assignment.allowed_paths).unwrap(), serde_json::to_string(&assignment.depends_on).unwrap(), position as i64],
         )?;
     }
     transaction.execute(
@@ -444,6 +447,56 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
     )?;
     transaction.commit()?;
     Ok(plan_id)
+}
+
+fn validate_dependencies(assignments: &[PlanAssignment]) -> Result<(), CommandError> {
+    let titles = assignments
+        .iter()
+        .map(|assignment| assignment.title.trim().to_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    let mut remaining = assignments
+        .iter()
+        .map(|assignment| {
+            let title = assignment.title.trim().to_lowercase();
+            let dependencies = assignment
+                .depends_on
+                .iter()
+                .map(|dependency| dependency.trim().to_lowercase())
+                .collect::<std::collections::HashSet<_>>();
+            if dependencies.contains(&title)
+                || dependencies
+                    .iter()
+                    .any(|dependency| !titles.contains(dependency))
+            {
+                return Err(CommandError::new(
+                    "invalid_plan_dependency",
+                    "Dependencies must name another assignment in this plan",
+                ));
+            }
+            Ok((title, dependencies))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut resolved = std::collections::HashSet::new();
+    loop {
+        let ready = remaining
+            .iter()
+            .filter(|(_, dependencies)| dependencies.is_subset(&resolved))
+            .map(|(title, _)| title.clone())
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            break;
+        }
+        resolved.extend(ready);
+        remaining.retain(|(title, _)| !resolved.contains(title));
+    }
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            "cyclic_plan_dependency",
+            "Assignment dependencies must not form a cycle",
+        ))
+    }
 }
 
 pub fn decide(
@@ -772,12 +825,14 @@ mod tests {
                         instruction: "Build the view".into(),
                         role: "executor".into(),
                         allowed_paths: vec!["src/features/view".into()],
+                        depends_on: vec![],
                     },
                     PlanAssignment {
                         title: "API".into(),
                         instruction: "Build the command".into(),
                         role: "test".into(),
                         allowed_paths: vec!["src-tauri/src/features/view".into()],
+                        depends_on: vec!["UI".into()],
                     },
                 ],
             },
@@ -818,6 +873,7 @@ mod tests {
                     instruction: "Plan again".into(),
                     role: "planner".into(),
                     allowed_paths: vec![],
+                    depends_on: vec![],
                 }],
             },
         )

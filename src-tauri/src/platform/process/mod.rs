@@ -3,6 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::PathBuf,
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -36,6 +37,16 @@ struct Handle {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    process_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessUsage {
+    pub active: bool,
+    pub process_id: Option<u32>,
+    pub cpu_percent: Option<f32>,
+    pub resident_bytes: Option<u64>,
 }
 
 #[derive(Clone, Default)]
@@ -44,6 +55,42 @@ pub struct ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    pub fn usage(&self, run_id: &str) -> ProcessUsage {
+        let process_id = self
+            .handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(run_id)
+            .and_then(|handle| handle.process_id);
+        let Some(process_id) = process_id else {
+            return ProcessUsage {
+                active: false,
+                process_id: None,
+                cpu_percent: None,
+                resident_bytes: None,
+            };
+        };
+        let metrics = Command::new("ps")
+            .args(["-o", "%cpu=,rss=", "-p", &process_id.to_string()])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|output| {
+                let mut fields = output.split_whitespace();
+                Some((
+                    fields.next()?.parse().ok(),
+                    fields.next()?.parse::<u64>().ok().map(|value| value * 1024),
+                ))
+            });
+        ProcessUsage {
+            active: true,
+            process_id: Some(process_id),
+            cpu_percent: metrics.as_ref().and_then(|metrics| metrics.0),
+            resident_bytes: metrics.and_then(|metrics| metrics.1),
+        }
+    }
+
     pub fn is_active(&self, run_id: &str) -> bool {
         self.handles
             .lock()
@@ -101,6 +148,7 @@ impl ProcessSupervisor {
                     master: pair.master,
                     writer,
                     killer,
+                    process_id,
                 },
             );
         let cursor = Arc::new(AtomicU64::new(initial_cursor));

@@ -308,6 +308,9 @@ pub(crate) fn rollup_in_transaction(
 
 fn can_transition(from: &str, to: &str) -> bool {
     const BOARD_STATUSES: [&str; 5] = ["task", "working", "review", "failed", "approved"];
+    if from != "archived" && to == "archived" {
+        return true;
+    }
     if from != "archived" && BOARD_STATUSES.contains(&to) {
         return true;
     }
@@ -438,6 +441,14 @@ mod tests {
         assert_eq!(list(&db, &task.project_id, true).unwrap().len(), 1);
         assert_eq!(update_status(&db, &task.id, "task").unwrap().status, "task");
         assert!(list(&db, &task.project_id, true).unwrap().is_empty());
+        assert_eq!(
+            update_status(&db, &task.id, "working").unwrap().status,
+            "working"
+        );
+        assert_eq!(
+            update_status(&db, &task.id, "archived").unwrap().status,
+            "archived"
+        );
         assert_eq!(
             update_status(&db, &task.id, "unknown").unwrap_err().code,
             "invalid_task_status"

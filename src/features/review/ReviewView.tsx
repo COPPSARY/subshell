@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Check, GitMerge, RotateCcw } from "lucide-react";
+import { AlertTriangle, Check, GitMerge, ListPlus, RotateCcw } from "lucide-react";
 import { PreviewPanel } from "../preview";
+import { enqueueMerge } from "../workspace";
 import { approveReview, getReview, mergeReview, sendBackReview } from "./api";
 import type { Review } from "./model";
 
@@ -10,6 +11,7 @@ export function ReviewView({ taskId }: { taskId: string }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [mergedRevision, setMergedRevision] = useState("");
+  const [queued, setQueued] = useState(false);
   const [materializedPatch, setMaterializedPatch] = useState<string | null>(null);
 
   useEffect(() => {
@@ -29,6 +31,11 @@ export function ReviewView({ taskId }: { taskId: string }) {
     setBusy(true); setError("");
     try { setMergedRevision(await mergeReview(review.id, review.fingerprint)); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   }
+  async function queueMerge() {
+    if (!review) return;
+    setBusy(true); setError("");
+    try { await enqueueMerge(review.id, review.fingerprint); setQueued(true); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
+  }
 
   if (error && !review) return <p className="error-banner" role="alert">{error}</p>;
   if (!review) return <p className="empty-row">Assembling the exact combined review…</p>;
@@ -36,7 +43,8 @@ export function ReviewView({ taskId }: { taskId: string }) {
     <header className="flex flex-wrap items-start gap-4 border-b border-line pb-4">
       <div className="min-w-0 flex-1"><p className="text-[11px] font-semibold uppercase tracking-wider text-tertiary">Combined review · attempt {review.attemptNumber}</p><h2 className="mt-1 text-xl font-medium">{review.runs.length} agent result{review.runs.length === 1 ? "" : "s"}</h2><p className="mt-1 font-mono text-[11px] text-tertiary">Base {review.baseRevision.slice(0, 8)} · {review.fingerprint.slice(0, 12)}</p></div>
       {review.decision === "pending" && <button className="button-primary" disabled={busy} onClick={() => act(() => approveReview(review.id, review.fingerprint))} type="button"><Check size={14} />Approve exact result</button>}
-      {review.decision === "approved" && !mergedRevision && <button className="button-primary" disabled={busy} onClick={merge} type="button"><GitMerge size={14} />Merge locally</button>}
+      {review.decision === "approved" && !mergedRevision && !queued && <><button className="button-secondary" disabled={busy} onClick={queueMerge} type="button"><ListPlus size={14} />Add to merge queue</button><button className="button-primary" disabled={busy} onClick={merge} type="button"><GitMerge size={14} />Merge locally</button></>}
+      {queued && <span className="status-pill text-waiting">Queued for merge</span>}
       {mergedRevision && <span className="status-pill text-complete">Merged {mergedRevision.slice(0, 8)}</span>}
     </header>
     {error && <p className="error-banner mt-4" role="alert">{error}</p>}

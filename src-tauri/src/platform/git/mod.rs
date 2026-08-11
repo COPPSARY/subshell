@@ -43,6 +43,48 @@ pub struct GitService {
 }
 
 impl GitService {
+    pub fn search_commits(
+        &self,
+        path: &Path,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>, CommandError> {
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--all",
+                "--regexp-ignore-case",
+                "--fixed-strings",
+                "--format=%H%x1f%s",
+                "-z",
+                &format!("--max-count={}", limit.clamp(1, 100)),
+                &format!("--grep={query}"),
+            ])
+            .current_dir(path)
+            .output()
+            .map_err(|error| CommandError::new("git_unavailable", error.to_string()))?;
+        if !output.status.success() {
+            return Err(CommandError::new(
+                "git_failed",
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter_map(|line| {
+                let index = line.iter().position(|byte| *byte == 0x1f)?;
+                Some((&line[..index], &line[index + 1..]))
+            })
+            .map(|(hash, subject)| {
+                (
+                    String::from_utf8_lossy(hash).into_owned(),
+                    String::from_utf8_lossy(subject).into_owned(),
+                )
+            })
+            .collect())
+    }
+
     pub fn status(&self, path: &Path) -> Result<GitStatus, CommandError> {
         if !path.is_dir() {
             return Err(CommandError::new(
@@ -196,6 +238,32 @@ impl GitService {
             patch.extend(output.stdout);
         }
         Ok(ExactGitDiff { files, patch })
+    }
+
+    pub fn restore_snapshot(
+        &self,
+        worktree: &Path,
+        base_revision: &str,
+        patch: &[u8],
+    ) -> Result<(), CommandError> {
+        let current = self.exact_diff(worktree, base_revision)?;
+        git_command(worktree, ["reset", "--hard", base_revision], None)?;
+        git_command(worktree, ["clean", "-fd"], None)?;
+        if let Err(error) = apply_patch(worktree, patch) {
+            git_command(worktree, ["reset", "--hard", base_revision], None)?;
+            git_command(worktree, ["clean", "-fd"], None)?;
+            apply_patch(worktree, &current.patch).map_err(|restore_error| {
+                CommandError::new(
+                    "snapshot_recovery_failed",
+                    format!(
+                        "Snapshot failed: {}; restoring the previous worktree also failed: {}",
+                        error.message, restore_error.message
+                    ),
+                )
+            })?;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn create_worktree(
@@ -840,6 +908,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
             "fixture"
+        );
+    }
+
+    #[test]
+    fn failed_snapshot_restore_recovers_the_current_worktree() {
+        let repo = repository();
+        let service = GitService::default();
+        let base = service.status(repo.path()).unwrap().revision.unwrap();
+        std::fs::write(repo.path().join("README.md"), "working state").unwrap();
+
+        assert!(
+            service
+                .restore_snapshot(repo.path(), &base, b"not a patch")
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+            "working state"
         );
     }
 }

@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Search } from "lucide-react";
 import appIconUrl from "../../assets/app-icon.svg";
 import { getHealth } from "../features/health";
-import { ProjectsView, restoreProject, type Project } from "../features/projects";
+import { listProjects, ProjectsView, restoreProject, type Project } from "../features/projects";
 import { ProvidersView } from "../features/providers";
 import { AgentsView, decideQuit } from "../features/runs";
 import { createTask, getTask, listTasks, TasksView, type Task } from "../features/tasks";
@@ -12,6 +12,7 @@ import { destinations, type DestinationName } from "./navigation";
 import { WorkspaceRail } from "./WorkspaceRail";
 import { CommandPalette, type AppCommand } from "./CommandPalette";
 import { SafeQuitDialog } from "./SafeQuitDialog";
+import { WorkspaceView } from "../features/workspace";
 
 export function AppShell() {
   const [active, setActive] = useState<DestinationName>("Projects");
@@ -60,16 +61,25 @@ export function AppShell() {
     });
     setProject(selectedProject); setSelectedTask(task); setAutoStartTaskId(task.id); setSelectedRunId(null); setActive("Tasks");
   }
+  async function openTask(task: Task, runId?: string | null) {
+    if (task.projectId !== project?.id) {
+      const owner = (await listProjects()).find((item) => item.id === task.projectId);
+      if (owner) setProject(owner);
+    }
+    setSelectedTask(task); setSelectedRunId(runId ?? null); setActive("Tasks");
+  }
   const commands = useMemo<AppCommand[]>(() => destinations.map((destination) => ({ id: `open-${destination.name.toLowerCase()}`, label: `Open ${destination.name}`, detail: destination.name === "Projects" ? "Open a repository or start a goal" : `Go to the ${destination.name.toLowerCase()} workspace`, run: () => setActive(destination.name) })), []);
   const activeView = active === "Projects"
     ? <ProjectsView selectedProject={project} onSelect={(nextProject) => { if (nextProject.id !== project?.id) { setSelectedTask(null); setSelectedRunId(null); setAutoStartTaskId(null); } setProject(nextProject); }} onStartGoal={startGoal} />
+    : active === "Workspace"
+      ? <WorkspaceView onOpen={openTask} onOpenResult={(taskId, runId) => getTask(taskId).then((task) => openTask(task, runId))} project={project} tasks={tasks} />
     : active === "Tasks"
       ? <TasksView autoStartTaskId={autoStartTaskId} initialRunId={selectedRunId} initialTask={selectedTask} onAutoStartConsumed={() => setAutoStartTaskId(null)} onSelectRun={setSelectedRunId} onSelectTask={setSelectedTask} project={project} />
       : active === "Agents"
         ? <AgentsView onNewGoal={() => setActive("Projects")} onOpen={(task, runId) => { setSelectedTask(task); setSelectedRunId(runId); setActive("Tasks"); }} project={project} tasks={tasks} />
       : active === "Providers"
         ? <ProvidersView />
-        : <TimelineView onOpen={(taskId, runId) => getTask(taskId).then((task) => { setSelectedTask(task); setSelectedRunId(runId ?? null); setActive("Tasks"); })} project={project} tasks={tasks} />;
+        : <TimelineView onOpen={(taskId, runId) => getTask(taskId).then((task) => openTask(task, runId))} project={project} tasks={tasks} />;
 
   return (
     <div className="grid h-full overflow-hidden grid-cols-[14rem_minmax(0,1fr)] bg-app xl:grid-cols-[15rem_minmax(0,1fr)]">

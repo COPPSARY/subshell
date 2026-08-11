@@ -14,8 +14,6 @@ type Props = {
   onArchived?: (taskId: string) => void;
 };
 
-const terminalTaskStatuses = new Set(["review", "approved", "merged", "failed", "cancelled"]);
-
 export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect, onArchived }: Props) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [archivedTasks, setArchivedTasks] = useState<Task[]>([]);
@@ -86,7 +84,7 @@ export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect
       {error && <p className="px-2 py-2 text-xs text-failed" role="alert">{error}</p>}
       {project && !error && !workspaces.length ? <div className="px-2 py-4"><p className="text-xs font-medium text-secondary">No active workspaces</p><p className="mt-1 text-[11px] leading-4 text-tertiary">Start a goal or restore one from Archive.</p></div> : project && <div className="ml-3 border-l border-line/70 pl-2">
         {workspaces.map(({ task, runs }) => {
-          const canArchive = terminalTaskStatuses.has(task.status) && runs.every((run) => ["succeeded", "failed", "cancelled"].includes(run.status));
+          const canArchive = !runs.some((run) => ["queued", "preparing", "running"].includes(run.status));
           const taskSelected = task.id === selectedTaskId && !selectedRunId;
           return <div className="relative mb-0.5" key={task.id}>
             <span aria-hidden="true" className={`absolute -left-2 top-4 h-px w-2 ${taskSelected ? "bg-accent" : "bg-line/70"}`} />
@@ -96,7 +94,7 @@ export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect
                 <span className="min-w-0 flex-1 truncate font-medium">{task.title}</span>
                 <StateIndicator status={task.status} />
               </button>
-              {canArchive && <button aria-label={`Workspace actions for ${task.title}`} aria-expanded={menuTaskId === task.id} className="absolute right-5 flex size-7 items-center justify-center text-tertiary opacity-0 outline-none hover:text-primary focus:opacity-100 focus-visible:ring-1 focus-visible:ring-line-strong group-hover:opacity-100" onClick={(event) => { event.stopPropagation(); setMenuTaskId((current) => current === task.id ? null : task.id); }} type="button"><MoreHorizontal aria-hidden="true" size={13} /></button>}
+              {canArchive && <button aria-label={`Workspace actions for ${task.title}`} aria-expanded={menuTaskId === task.id} className="absolute right-5 flex size-7 items-center justify-center text-tertiary opacity-60 outline-none hover:text-primary hover:opacity-100 focus:opacity-100 focus-visible:ring-1 focus-visible:ring-line-strong" onClick={(event) => { event.stopPropagation(); setMenuTaskId((current) => current === task.id ? null : task.id); }} title="Workspace actions" type="button"><MoreHorizontal aria-hidden="true" size={13} /></button>}
               {menuTaskId === task.id && <div className="absolute right-1 top-8 z-20 min-w-36 border border-line-strong bg-panel p-1" role="menu"><button className="flex h-8 w-full items-center gap-2 px-2 text-left text-[11px] text-secondary outline-none hover:bg-selected hover:text-primary focus-visible:bg-selected focus-visible:text-primary" onClick={() => archiveTask(task)} role="menuitem" type="button"><Archive aria-hidden="true" size={13} />Archive workspace</button></div>}
             </div>
 

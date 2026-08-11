@@ -291,7 +291,7 @@ fn decide(
     review_by_id(database, &input.attempt_id)
 }
 
-fn merge(
+pub(crate) fn merge(
     input: MergeInput,
     database: &Database,
     paths: &RuntimePaths,
@@ -354,6 +354,23 @@ fn merge(
         )?;
     }
     result
+}
+
+pub(crate) fn queue_candidate(
+    database: &Database,
+    attempt_id: &str,
+    fingerprint: &str,
+) -> Result<(String, String), CommandError> {
+    let review = review_by_id(database, attempt_id)?;
+    if review.decision != "approved" || review.fingerprint != fingerprint {
+        return Err(CommandError::new(
+            "review_not_approved",
+            "Approve this exact review before adding it to the merge queue",
+        ));
+    }
+    let task = tasks::get(database, &review.task_id)?
+        .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
+    Ok((task.id, task.project_id))
 }
 
 pub(crate) fn verified_review(
@@ -709,6 +726,10 @@ fn review_by_id(database: &Database, id: &str) -> Result<Review, CommandError> {
 }
 
 fn reviewable_task(database: &Database, task_id: &str) -> Result<tasks::Task, CommandError> {
+    let mut connection = database.connect()?;
+    let transaction = connection.transaction()?;
+    tasks::rollup_in_transaction(&transaction, task_id)?;
+    transaction.commit()?;
     let task = tasks::get(database, task_id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
     if !matches!(task.status.as_str(), "review" | "approved") {
@@ -790,6 +811,20 @@ mod tests {
         platform::process::{ProcessSpec, ProcessSupervisor},
     };
     use std::{process::Command, sync::Arc};
+
+    #[test]
+    fn completed_runs_reconcile_a_stale_task_before_review() {
+        let root = tempfile::tempdir().unwrap();
+        let database = Database::initialize(&root.path().join("db.sqlite3")).unwrap();
+        let connection = database.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/repo','now','now')", []).unwrap();
+        connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Completed work','working','main','base','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,status,merge_order,created_at,updated_at) VALUES('run','task','provider','Implement','implementer','succeeded',0,'now','now')", []).unwrap();
+        drop(connection);
+
+        assert_eq!(reviewable_task(&database, "task").unwrap().status, "review");
+    }
 
     #[test]
     fn conflict_flags_are_informational_and_deterministic() {

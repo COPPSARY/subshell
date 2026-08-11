@@ -8,7 +8,7 @@ vi.mock("../attention", () => ({ acknowledgeAttention:vi.fn(),claimAttentionNoti
 vi.mock("./api", () => ({ listTimeline:vi.fn() }));
 
 beforeEach(() => {
-  vi.mocked(listTimeline).mockResolvedValue([{ id:"e1",projectId:"p",taskId:"t",runId:"r",providerId:"provider",sequence:4,eventType:"run.status_changed",payload:{to:"failed"},createdAt:"now" }]);
+  vi.mocked(listTimeline).mockResolvedValue([{ id:"e1",projectId:"p",projectName:"Repo",taskId:"t",runId:"r",providerId:"provider",sequence:4,eventType:"run.status_changed",payload:{to:"failed"},createdAt:"now" }]);
   vi.mocked(listAttention).mockResolvedValue([{ key:"approval:a",reason:"approval_waiting",projectId:"p",taskId:"t",runId:"r",approvalRequestId:"a",title:"Fix",detail:"Agent requested: merge_task",stateFingerprint:"pending:now",acknowledged:false,createdAt:"now" }]);
   vi.mocked(listApprovals).mockResolvedValue([{ id:"a",projectId:"p",taskId:"t",runId:"r",action:"merge_task",arguments:{},status:"pending",requestedBy:"agent",createdAt:"now",decidedAt:null }]);
   vi.mocked(acknowledgeAttention).mockResolvedValue(undefined);

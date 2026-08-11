@@ -2,12 +2,18 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, expect, it, vi } from "vitest";
 import { listContextSources, previewContext } from "../context";
 import { createProvider, detectProviders, listProviders } from "../providers";
+import { listAgentTemplates, listEnvironmentProfiles } from "../workspace";
 import { approveTaskPlan, completeRun, getTaskPlan, listRuns, readRunDiff, rejectTaskPlan, resumeRun, startRuns } from "./api";
 import { RunWorkspace } from "./RunWorkspace";
 
 vi.mock("../context", () => ({ listContextSources: vi.fn(), previewContext: vi.fn() }));
 vi.mock("../providers", () => ({ createProvider: vi.fn(), detectProviders: vi.fn(), listProviders: vi.fn(), ProviderIcon: ({ name }: { name: string }) => <span>{name}</span> }));
 vi.mock("../review", () => ({ ReviewView: () => <div>Combined review</div> }));
+vi.mock("../workspace", () => ({
+  applyEnvironmentProfile: vi.fn(),
+  listAgentTemplates: vi.fn().mockResolvedValue([]),
+  listEnvironmentProfiles: vi.fn().mockResolvedValue([]),
+}));
 vi.mock("./api", () => ({ approveTaskPlan: vi.fn(), completeRun: vi.fn(), getTaskPlan: vi.fn(), listRuns: vi.fn(), previewRunEnvironment: vi.fn(), readRunDiff: vi.fn(), rejectTaskPlan: vi.fn(), resumeRun: vi.fn(), startRuns: vi.fn(), stopRun: vi.fn() }));
 const terminalView = vi.hoisted(() => ({ received: 0, renders: 0 }));
 vi.mock("./RunTerminal", () => ({ RunTerminal: ({ runId, subscribe }: { runId: string; subscribe: (id: string, listener: () => void) => () => void }) => { terminalView.renders += 1; subscribe(runId, () => { terminalView.received += 1; }); return <div>Terminal</div>; } }));
@@ -18,6 +24,8 @@ beforeEach(() => {
   vi.mocked(listContextSources).mockResolvedValue(["README.md"]);
   vi.mocked(listRuns).mockResolvedValue([]);
   vi.mocked(getTaskPlan).mockResolvedValue(null);
+  vi.mocked(listAgentTemplates).mockResolvedValue([]);
+  vi.mocked(listEnvironmentProfiles).mockResolvedValue([]);
   vi.mocked(readRunDiff).mockResolvedValue({ files: ["src/app.ts"], patch: "+changed", truncated: false });
   vi.mocked(previewContext).mockResolvedValue({ token: "draft", content: "focused context", sha256: "abc", manifest: { entries: [{ source: "task", bytes: 15, included: true, reason: null }], totalBytes: 15, budgetBytes: 65536, reportedTokens: null, wasEdited: false, sha256: "abc" } });
 });
@@ -25,7 +33,7 @@ beforeEach(() => {
 it("surfaces a planner proposal and starts its approved assignments", async () => {
   const planner = { id: "planner", taskId: "task", providerId: "p1", providerName: "Codex", instruction: "Plan", role: "planner", title: "Plan the goal", status: "waiting", waitingReason: "Plan ready for approval", worktreePath: "/tmp/planner", rawLogPath: null, contextPackPath: null, port: 4100, updatedAt: "now" };
   const executor = { ...planner, id: "executor", role: "executor", title: "Build UI", instruction: "Implement the UI", status: "running", waitingReason: null, worktreePath: "/tmp/executor" };
-  const plan = { id: "plan", taskId: "task", plannerRunId: "planner", summary: "Build the feature in parallel", status: "proposed" as const, assignments: [{ id: "assignment", title: "Build UI", instruction: "Implement the UI", role: "executor", allowedPaths: ["src/"], position: 0 }], createdAt: "now" };
+  const plan = { id: "plan", taskId: "task", plannerRunId: "planner", summary: "Build the feature in parallel", status: "proposed" as const, assignments: [{ id: "assignment", title: "Build UI", instruction: "Implement the UI", role: "executor", allowedPaths: ["src/"], dependsOn: [], position: 0 }], createdAt: "now" };
   vi.mocked(listRuns).mockResolvedValueOnce([planner]).mockResolvedValue([planner, executor]);
   vi.mocked(getTaskPlan).mockResolvedValue(plan);
   vi.mocked(approveTaskPlan).mockResolvedValue({ ...plan, status: "launched" });
@@ -48,6 +56,15 @@ it("previews editable context and adds independent assignments", async () => {
   expect(await screen.findByDisplayValue("focused context")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Add assignment" }));
   expect(screen.getByRole("heading", { name: "Assignment 2" })).toBeTruthy();
+});
+
+it("applies a reusable agent template to a new assignment", async () => {
+  vi.mocked(listAgentTemplates).mockResolvedValue([{ id: "template", projectId: "project", name: "Codex reviewer", providerId: "p1", role: "reviewer", instruction: "Review the implementation", environmentFiles: [".env.example"], unitLimit: 80 }]);
+  render(<RunWorkspace project={{ id: "project", name: "Repo", path: "/tmp/repo", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }} task={{ id: "task", projectId: "project", title: "Task", description: "", status: "task", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" }} />);
+  fireEvent.change(await screen.findByLabelText("Agent template"), { target: { value: "template" } });
+  expect((screen.getByLabelText("Agent role") as HTMLSelectElement).value).toBe("reviewer");
+  expect(screen.queryByLabelText("Usage limit")).toBeNull();
+  expect((screen.getByLabelText("Assignment instruction") as HTMLTextAreaElement).value).toBe("Review the implementation");
 });
 
 it("turns a quick goal into a context-backed run automatically", async () => {

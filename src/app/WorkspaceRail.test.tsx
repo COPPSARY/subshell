@@ -37,10 +37,10 @@ it("marks only the selected run instead of also selecting its parent task", asyn
   expect(runButton.getAttribute("aria-current")).toBe("page");
 });
 
-it("archives a stopped workspace from its context menu", async () => {
-  const task = { id: "task-1", projectId: "project-1", title: "Fix login", description: "", status: "cancelled", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" };
+it("archives a completed workspace even when its task status is stale", async () => {
+  const task = { id: "task-1", projectId: "project-1", title: "Fix login", description: "", status: "working", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" };
   vi.mocked(listTasks).mockResolvedValue([task]);
-  vi.mocked(listRuns).mockResolvedValue([{ id: "run-1", taskId: task.id, providerId: "codex", providerName: "Codex", instruction: "Fix login", status: "cancelled", worktreePath: "/tmp/worktree", rawLogPath: null, contextPackPath: null, port: null, updatedAt: "now" }]);
+  vi.mocked(listRuns).mockResolvedValue([{ id: "run-1", taskId: task.id, providerId: "codex", providerName: "Codex", instruction: "Fix login", status: "succeeded", worktreePath: "/tmp/worktree", rawLogPath: null, contextPackPath: null, port: null, updatedAt: "now" }]);
   vi.mocked(updateTaskStatus).mockResolvedValue({ ...task, status: "archived" });
   const archived = vi.fn();
 

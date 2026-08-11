@@ -1,0 +1,100 @@
+import { useEffect, useMemo, useState } from "react";
+import { Bookmark as BookmarkIcon, Boxes, GitMerge, HardDrive, Play, Plus, RotateCcw, Search, Settings2, Trash2 } from "lucide-react";
+import type { Project } from "../projects";
+import { listProviders, type GenericProfile } from "../providers";
+import type { Task } from "../tasks";
+import { createSnapshot, getDashboard, listAgentTemplates, listBookmarks, listEnvironmentProfiles, listExplorerAgents, listMergeQueue, listSnapshots, processMergeQueue, removeAgentTemplate, removeEnvironmentProfile, rollbackSnapshot, saveAgentTemplate, saveEnvironmentProfile, searchWorkspace, toggleBookmark } from "./api";
+import type { AgentTemplate, Bookmark, Dashboard, EnvironmentProfile, ExplorerAgent, MergeQueueItem, WorkspaceSearchResult, WorkspaceSnapshot } from "./model";
+
+type Props = { project: Project | null; tasks: Task[]; onOpen: (task: Task, runId?: string | null) => void; onOpenResult?: (taskId: string, runId?: string | null) => void };
+type Agent = ExplorerAgent & { task: Task };
+
+export function WorkspaceView({ project, tasks, onOpen, onOpenResult }: Props) {
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [templates, setTemplates] = useState<AgentTemplate[]>([]);
+  const [profiles, setProfiles] = useState<EnvironmentProfile[]>([]);
+  const [providers, setProviders] = useState<GenericProfile[]>([]);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [snapshots, setSnapshots] = useState<WorkspaceSnapshot[]>([]);
+  const [queue, setQueue] = useState<MergeQueueItem[]>([]);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<WorkspaceSearchResult[]>([]);
+  const [view, setView] = useState<"overview" | "setup">("overview");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+
+  async function load() {
+    if (!project) { setDashboard(null); setAgents([]); return; }
+    try {
+      const [nextDashboard, nextTemplates, nextProfiles, nextProviders, nextBookmarks, nextSnapshots, nextQueue, nextAgents] = await Promise.all([
+        getDashboard(project.id), listAgentTemplates(project.id), listEnvironmentProfiles(project.id), listProviders(), listBookmarks(project.id), listSnapshots(project.id), listMergeQueue(project.id), listExplorerAgents(project.id),
+      ]);
+      const flat = nextAgents.flatMap((agent) => { const task = taskById.get(agent.run.taskId); return task ? [{ task, ...agent }] : []; });
+      setDashboard(nextDashboard); setTemplates(nextTemplates); setProfiles(nextProfiles); setProviders(nextProviders); setBookmarks(nextBookmarks); setSnapshots(nextSnapshots); setQueue(nextQueue); setAgents(flat); setError("");
+    } catch (reason) { setError(message(reason)); }
+  }
+  useEffect(() => { void load(); const timer = project ? window.setInterval(load, 5000) : undefined; return () => { if (timer) window.clearInterval(timer); }; }, [project?.id, tasks.map((task) => `${task.id}:${task.updatedAt}`).join("|")]);
+
+  async function act(action: () => Promise<unknown>) { setBusy(true); setError(""); try { await action(); await load(); } catch (reason) { setError(message(reason)); } finally { setBusy(false); } }
+  async function search(event: React.FormEvent) { event.preventDefault(); setBusy(true); try { setResults(await searchWorkspace(query)); setError(""); } catch (reason) { setError(message(reason)); } finally { setBusy(false); } }
+  async function pin(result: WorkspaceSearchResult) { if (!project || !["task", "agent", "log", "event"].includes(result.kind)) return; const kind = result.kind === "event" ? "event" : result.runId ? "run" : "task"; await act(() => toggleBookmark(project.id, kind, kind === "event" ? result.id : kind === "run" ? result.runId! : result.taskId!, result.title)); }
+  function open(result: WorkspaceSearchResult) { if (!result.taskId) return; const task = taskById.get(result.taskId); if (task) onOpen(task, result.runId); else onOpenResult?.(result.taskId, result.runId); }
+
+  if (!project) return <div className="w-full p-7"><h1 className="text-base font-medium">Workspace dashboard</h1><p className="mt-2 text-sm text-secondary">Open a project to inspect agents, processes, worktrees, environments, and integration state.</p><GlobalSearch busy={busy} onSearch={search} query={query} results={results} setQuery={setQuery} /></div>;
+  const groups = tasks.map((task) => ({ task, agents: agents.filter((agent) => agent.task.id === task.id) }));
+  return <div className="min-h-full w-full p-5 lg:p-7">
+    <header className="flex min-h-16 items-center justify-between border-b border-line">
+      <div><h1 className="text-base font-medium">Workspace</h1><p className="mt-1 text-xs text-tertiary">Monitor agent work and control what reaches your checkout.</p></div>
+      <div className="text-right"><span className={`status-pill ${project.git.dirty ? "text-waiting" : "text-complete"}`}>{project.git.dirty ? "Checkout has local changes" : "Checkout is clean"}</span><p className="mt-1 font-mono text-[10px] text-tertiary">{project.git.branch ?? "detached"}</p></div>
+    </header>
+    <nav aria-label="Workspace sections" className="mt-4 flex w-fit gap-1 rounded-md bg-chrome p-1">
+      {([['overview', 'Overview'], ['setup', 'Agent setup']] as const).map(([id, label]) => <button aria-current={view === id ? "page" : undefined} className="rounded px-3 py-1.5 text-xs text-secondary hover:text-primary aria-[current=page]:bg-selected aria-[current=page]:text-primary" key={id} onClick={() => setView(id)} type="button">{label}</button>)}
+    </nav>
+    {error && <p className="error-banner" role="alert">{error}</p>}
+
+    {view === "overview" ? <>
+      {dashboard && <><section aria-label="Project status" className="mt-4 grid overflow-hidden rounded-md border border-line bg-line sm:grid-cols-4 xl:grid-cols-8">{[["Active agents", dashboard.activeAgents], ["Pending tasks", dashboard.pendingTasks], ["Needs attention", dashboard.attentionItems], ["Blocked", dashboard.blockedTasks], ["Failures", dashboard.failures], ["Reviews", dashboard.reviews], ["Merge queue", dashboard.queuedMerges], ["Reported units", dashboard.totalReportedUnits]].map(([label, value]) => <div className="bg-app px-3 py-3" key={label}><strong className="block font-mono text-lg font-medium text-primary">{Number(value).toLocaleString()}</strong><span className="mt-1 block text-[10px] text-tertiary">{label}</span></div>)}</section>{dashboard.recentActivity.length > 0 && <section aria-label="Recent project activity" className="mt-4"><h2 className="text-xs font-medium text-secondary">Recent activity</h2><ul className="mt-2 flex flex-wrap gap-2">{dashboard.recentActivity.map((item, index) => <li className="status-pill" key={`${item.createdAt}:${index}`}>{item.eventType.replaceAll("_", " ")}</li>)}</ul></section>}</>}
+      <GlobalSearch busy={busy} onOpen={open} onPin={pin} onSearch={search} query={query} results={results} setQuery={setQuery} />
+      <section className="mt-7" aria-label="Workspace explorer">
+        <div className="border-b border-line pb-2"><div className="flex items-center gap-2"><Boxes size={14} /><h2 className="text-sm font-medium">Active work</h2></div><p className="mt-1 text-[11px] text-tertiary">Each task groups its agents, isolated worktrees, ports, and processes.</p></div>
+        {groups.length ? <div className="divide-y divide-line">{groups.map(({ task, agents: group }) => <article className="py-4" key={task.id}>
+          <div className="flex flex-wrap items-center gap-2"><button className="min-w-0 flex-1 truncate text-left text-sm font-medium" onClick={() => onOpen(task)} type="button">{task.title}</button><span className="status-pill">{task.status}</span><span className="font-mono text-[10px] text-tertiary">{group.length} agent{group.length === 1 ? "" : "s"}</span>{group.length > 1 && <button className="button-secondary" onClick={() => onOpen(task)} type="button">Compare agents</button>}</div>
+          {group.length ? <ul className="mt-3 grid gap-3 md:grid-cols-2">{group.map(({ run, usage }) => <li className="rounded-md border border-line bg-chrome p-3" key={run.id}>
+            <div className="flex items-center gap-2"><button className="min-w-0 flex-1 text-left" onClick={() => onOpen(task, run.id)} type="button"><strong className="block truncate text-xs">{run.title || run.role || "Agent"}</strong><span className="mt-0.5 block text-[10px] text-tertiary">{run.providerName} · {run.role}</span></button><span className="status-pill">{run.status}</span></div>
+            <dl className="mt-3 grid grid-cols-3 gap-2 font-mono text-[10px] text-tertiary"><div><dt>Process</dt><dd className="mt-0.5 text-secondary">{usage?.processId ?? "—"}</dd></div><div><dt>CPU / memory</dt><dd className="mt-0.5 text-secondary">{usage?.cpuPercent != null ? `${usage.cpuPercent.toFixed(1)}%` : "—"} · {formatBytes(usage?.residentBytes)}</dd></div><div><dt>Preview port</dt><dd className="mt-0.5 text-secondary">{run.port ?? "—"}</dd></div></dl>
+            <p className="mt-3 truncate font-mono text-[9px] text-tertiary" title={run.worktreePath ?? undefined}>{run.worktreePath ?? "Preparing isolated worktree…"}</p>
+            {usage?.active && run.canResume && <button className="button-secondary mt-3" disabled={busy} onClick={() => act(() => createSnapshot(run.id, "checkpoint", `Checkpoint · ${run.title || run.role}`))} type="button">Checkpoint and pause agent</button>}
+          </li>)}</ul> : <p className="mt-2 text-xs text-tertiary">No agents assigned yet.</p>}
+        </article>)}</div> : <p className="empty-row">No task groups yet.</p>}
+      </section>
+      <div className="mt-7 grid gap-6 md:grid-cols-2">
+        <section><div className="flex items-center gap-2 border-b border-line pb-2"><GitMerge size={14} /><div><h2 className="text-sm font-medium">Merge queue</h2><p className="mt-1 text-[11px] text-tertiary">Integrate approved reviews one at a time.</p></div><button className="button-primary ml-auto" disabled={busy || !queue.some((item) => item.status === "queued")} onClick={() => act(() => processMergeQueue(project.id))} type="button"><Play size={12} />Process next merge</button></div>{queue.length ? <ul className="divide-y divide-line">{queue.map((item) => <li className="py-3 text-xs" key={item.id}><div className="flex items-center gap-2"><span className="status-pill">{item.status}</span><button className="truncate text-left" onClick={() => { const task = taskById.get(item.taskId); if (task) onOpen(task); }} type="button">{taskById.get(item.taskId)?.title ?? item.taskId}</button></div>{item.error && <p className="mt-1 text-failed">{item.error}</p>}</li>)}</ul> : <p className="empty-row">Approved reviews you queue will appear here.</p>}</section>
+        <section><div className="flex items-center gap-2 border-b border-line pb-2"><HardDrive size={14} /><div><h2 className="text-sm font-medium">Safety snapshots</h2><p className="mt-1 text-[11px] text-tertiary">Restore an agent worktree without changing your checkout.</p></div></div>{snapshots.length ? <ul className="divide-y divide-line">{snapshots.map((snapshot) => <li className="flex items-center gap-2 py-3" key={snapshot.id}><span className="status-pill">{snapshot.kind}</span><span className="min-w-0 flex-1 truncate text-xs">{snapshot.label}</span><button className="button-secondary" disabled={busy} onClick={() => { if (window.confirm(`Restore ${snapshot.label}? SubShell will first save the current worktree state.`)) void act(() => rollbackSnapshot(snapshot.id)); }} type="button"><RotateCcw size={12} />Restore</button></li>)}</ul> : <p className="empty-row">Checkpoint a resumable agent before risky work.</p>}</section>
+        <section className="md:col-span-2"><div className="flex items-center gap-2 border-b border-line pb-2"><BookmarkIcon size={14} /><h2 className="text-sm font-medium">Pinned items</h2><span className="ml-auto font-mono text-[10px] text-tertiary">{bookmarks.length}</span></div>{bookmarks.length ? <ul className="divide-y divide-line">{bookmarks.map((bookmark) => <li className="flex items-center gap-2 py-3 text-xs" key={bookmark.id}><span className="min-w-0 flex-1 truncate">{bookmark.label || bookmark.runId || bookmark.taskId || bookmark.eventId}</span><button className="button-secondary" onClick={() => act(() => toggleBookmark(project.id, bookmark.eventId ? "event" : bookmark.runId ? "run" : "task", bookmark.eventId ?? bookmark.runId ?? bookmark.taskId!))} type="button"><Trash2 size={12} />Remove pin</button></li>)}</ul> : <p className="empty-row">Pin a search result to keep it here.</p>}</section>
+      </div>
+    </> : <>
+      <div className="mt-6"><h2 className="text-base font-medium">Agent setup</h2><p className="mt-1 text-xs text-tertiary">Save reusable launch settings and testing environments.</p></div>
+      <div className="mt-5 grid overflow-hidden rounded-md border border-line bg-chrome lg:grid-cols-2"><AgentTemplates busy={busy} onAct={act} projectId={project.id} providers={providers} templates={templates} /><EnvironmentProfiles busy={busy} onAct={act} profiles={profiles} projectId={project.id} /></div>
+    </>}
+  </div>;
+}
+
+function GlobalSearch({ busy, onOpen, onPin, onSearch, query, results, setQuery }: { busy: boolean; onOpen?: (result: WorkspaceSearchResult) => void; onPin?: (result: WorkspaceSearchResult) => void; onSearch: (event: React.FormEvent) => void; query: string; results: WorkspaceSearchResult[]; setQuery: (value: string) => void }) {
+  return <section className="mt-6"><h2 className="text-xs font-medium text-secondary">Find anything</h2><form className="mt-2 flex gap-2" onSubmit={onSearch}><label className="flex min-h-10 flex-1 items-center gap-2 rounded border border-line bg-chrome px-3"><Search aria-hidden="true" size={14} /><span className="sr-only">Search workspace</span><input className="min-w-0 flex-1 bg-transparent text-sm outline-none" onChange={(event) => setQuery(event.target.value)} placeholder="Search tasks, agents, logs, events, commits, and reviews" value={query} /></label><button className="button-primary" disabled={busy || query.trim().length < 2} type="submit">Search workspace</button></form>{results.length > 0 && <ul className="mt-2 max-h-72 divide-y divide-line overflow-auto border-y border-line">{results.map((result, index) => <li className="flex items-center gap-2 py-2" key={`${result.kind}:${result.id}:${index}`}><button className="min-w-0 flex-1 text-left" onClick={() => onOpen?.(result)} type="button"><strong className="block truncate text-xs">{result.title}</strong><span className="block truncate text-[11px] text-tertiary">{result.kind} · {result.detail}</span></button>{onPin && ["task", "agent", "log", "event"].includes(result.kind) && <button className="button-secondary" onClick={() => onPin(result)} type="button"><BookmarkIcon size={12} />Pin</button>}</li>)}</ul>}</section>;
+}
+
+function AgentTemplates({ busy, onAct, projectId, providers, templates }: { busy: boolean; onAct: (action: () => Promise<unknown>) => Promise<void>; projectId: string; providers: GenericProfile[]; templates: AgentTemplate[] }) {
+  const [name, setName] = useState(""); const [role, setRole] = useState("implementer"); const [providerId, setProviderId] = useState(""); const [instruction, setInstruction] = useState("");
+  return <section className="p-4 lg:p-5"><div className="flex items-center gap-2 border-b border-line pb-3"><Plus size={14} /><div><h2 className="text-sm font-medium">Agent templates</h2><p className="mt-1 text-[11px] text-tertiary">Reuse a role, provider, and instruction when launching.</p></div></div><form className="form-panel form-panel-flat mt-4 sm:grid-cols-2" onSubmit={(event) => { event.preventDefault(); void onAct(() => saveAgentTemplate({ id: "", projectId, name, providerId: providerId || null, role, instruction, environmentFiles: [], unitLimit: null })).then(() => { setName(""); setInstruction(""); }); }}><label>Name<input required onChange={(event) => setName(event.target.value)} placeholder="Codex reviewer" value={name} /></label><label>Role<select onChange={(event) => setRole(event.target.value)} value={role}>{["planner", "implementer", "reviewer", "tester", "debugger", "research"].map((value) => <option key={value}>{value}</option>)}</select></label><label className="sm:col-span-2">Provider<select onChange={(event) => setProviderId(event.target.value)} value={providerId}><option value="">Choose at launch</option>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.displayName}</option>)}</select></label><label className="sm:col-span-2">Default instruction<textarea onChange={(event) => setInstruction(event.target.value)} placeholder="What should this agent do by default?" rows={3} value={instruction} /></label><button className="button-primary w-fit sm:col-span-2" disabled={busy} type="submit">Save agent template</button></form>{templates.length > 0 && <ul className="mt-3 divide-y divide-line">{templates.map((template) => <li className="flex items-center gap-2 py-2 text-xs" key={template.id}><strong className="min-w-0 flex-1 truncate">{template.name}</strong><span className="status-pill">{template.role}</span><button className="button-secondary" onClick={() => onAct(() => removeAgentTemplate(template.id))} type="button"><Trash2 size={12} />Remove</button></li>)}</ul>}</section>;
+}
+
+function EnvironmentProfiles({ busy, onAct, profiles, projectId }: { busy: boolean; onAct: (action: () => Promise<unknown>) => Promise<void>; profiles: EnvironmentProfile[]; projectId: string }) {
+  const [name, setName] = useState(""); const [files, setFiles] = useState(""); const [commands, setCommands] = useState("");
+  return <section className="border-t border-line p-4 lg:border-l lg:border-t-0 lg:p-5"><div className="flex items-center gap-2 border-b border-line pb-3"><Settings2 size={14} /><div><h2 className="text-sm font-medium">Environment profiles</h2><p className="mt-1 text-[11px] text-tertiary">Bundle safe environment files with required quality checks.</p></div></div><form className="form-panel form-panel-flat mt-4 sm:grid-cols-2" onSubmit={(event) => { event.preventDefault(); void onAct(() => saveEnvironmentProfile({ id: "", projectId, name, environmentFiles: lines(files), validationCommands: lines(commands) })).then(() => { setName(""); setFiles(""); setCommands(""); }); }}><label className="sm:col-span-2">Name<input required onChange={(event) => setName(event.target.value)} placeholder="CI checks" value={name} /></label><label>Environment files<textarea onChange={(event) => setFiles(event.target.value)} placeholder={".env.example\nconfig/test.env"} rows={4} value={files} /></label><label>Validation commands<textarea onChange={(event) => setCommands(event.target.value)} placeholder={"npm test\nnpm run build:web"} rows={4} value={commands} /></label><button className="button-primary w-fit sm:col-span-2" disabled={busy} type="submit">Save environment profile</button></form>{profiles.length > 0 && <ul className="mt-3 divide-y divide-line">{profiles.map((profile) => <li className="flex items-center gap-2 py-2 text-xs" key={profile.id}><strong className="min-w-0 flex-1 truncate">{profile.name}</strong><span className="text-tertiary">{profile.validationCommands.length} checks</span><button className="button-secondary" onClick={() => onAct(() => removeEnvironmentProfile(profile.id))} type="button"><Trash2 size={12} />Remove</button></li>)}</ul>}</section>;
+}
+
+function lines(value: string) { return value.split("\n").map((line) => line.trim()).filter(Boolean); }
+function formatBytes(value?: number | null) { if (value == null) return "—"; return `${(value / 1024 / 1024).toFixed(1)} MiB`; }
+function message(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : String(error); }

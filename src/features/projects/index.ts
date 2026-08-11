@@ -1,3 +1,3 @@
 export { ProjectsView } from "./ProjectsView";
-export { restoreProject } from "./api";
+export { listProjects, restoreProject } from "./api";
 export type { Project } from "./model";

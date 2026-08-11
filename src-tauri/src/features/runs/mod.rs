@@ -2,6 +2,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
+    time::Duration,
 };
 
 use rusqlite::{OptionalExtension, params};
@@ -73,6 +75,7 @@ pub struct Assignment {
     pub environment_files: Vec<String>,
     #[serde(default)]
     pub full_access: bool,
+    pub unit_limit: Option<u64>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +162,9 @@ pub struct Run {
     pub full_access: bool,
     pub reported_input_tokens: Option<u64>,
     pub reported_output_tokens: Option<u64>,
+    pub depends_on_run_ids: Vec<String>,
+    pub retry_of_run_id: Option<String>,
+    pub unit_limit: Option<u64>,
     pub port: Option<u16>,
     pub updated_at: String,
 }
@@ -170,6 +176,7 @@ pub struct TaskPlanAssignment {
     pub instruction: String,
     pub role: String,
     pub allowed_paths: Vec<String>,
+    pub depends_on: Vec<String>,
     pub position: u32,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -316,8 +323,27 @@ pub fn runs_resume(
     service.resume(&input.run_id, on_event)
 }
 #[tauri::command]
+pub fn runs_retry(
+    input: RunId,
+    on_event: Channel<RunStreamEvent>,
+    service: State<RunService>,
+) -> Result<Run, CommandError> {
+    service.retry(&input.run_id, on_event)
+}
+#[tauri::command]
 pub fn runs_diff(input: RunId, service: State<RunService>) -> Result<GitDiff, CommandError> {
     service.diff(&input.run_id)
+}
+
+#[tauri::command]
+pub fn runs_resources(
+    input: RunId,
+    service: State<RunService>,
+) -> Result<process::ProcessUsage, CommandError> {
+    if service.get(&input.run_id)?.is_none() {
+        return Err(CommandError::new("run_not_found", "Run was not found"));
+    }
+    Ok(service.processes.usage(&input.run_id))
 }
 
 #[tauri::command]
@@ -359,6 +385,138 @@ struct Prepared {
 }
 
 impl RunService {
+    fn retry(&self, id: &str, channel: Channel<RunStreamEvent>) -> Result<Run, CommandError> {
+        let previous = self
+            .get(id)?
+            .ok_or_else(|| CommandError::new("run_not_found", "Run was not found"))?;
+        if !matches!(
+            previous.status.as_str(),
+            "failed" | "cancelled" | "succeeded"
+        ) {
+            return Err(CommandError::new(
+                "run_not_finished",
+                "Only finished Runs can be re-run",
+            ));
+        }
+        ensure_usage_available(&self.database, &previous.task_id, Some(id))?;
+        let task = tasks::get(&self.database, &previous.task_id)?
+            .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
+        let project_path: PathBuf = self
+            .database
+            .connect()?
+            .query_row(
+                "SELECT path FROM projects WHERE id=?1",
+                [&task.project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map(PathBuf::from)?;
+        let (manifest_json, environment_json): (String, Option<String>) = self.database.connect()?.query_row(
+            "SELECT r.context_manifest_json,w.environment_manifest_json FROM agent_runs r LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let content =
+            fs::read_to_string(previous.context_pack_path.as_deref().ok_or_else(|| {
+                CommandError::new(
+                    "context_unavailable",
+                    "The original Run context is unavailable",
+                )
+            })?)
+            .map_err(io_error)?;
+        let token = context::restore(
+            &self.drafts,
+            serde_json::from_str(&manifest_json).map_err(json_error)?,
+        );
+        let environment_files = environment_json
+            .as_deref()
+            .map(serde_json::from_str::<environment::EnvironmentPreview>)
+            .transpose()
+            .map_err(json_error)?
+            .map(|preview| preview.files)
+            .unwrap_or_default();
+        let prior_patch = previous
+            .worktree_path
+            .as_deref()
+            .map(|path| self.git.exact_diff(Path::new(path), &task.base_revision))
+            .transpose()?;
+        let prepared = self
+            .prepare(
+                &task,
+                &project_path,
+                Assignment {
+                    provider_id: previous.provider_id.clone(),
+                    instruction: previous.instruction.clone(),
+                    role: previous.role.clone(),
+                    title: previous.title.clone(),
+                    context_token: token,
+                    approved_context: content,
+                    environment_files,
+                    full_access: previous.full_access,
+                    unit_limit: previous.unit_limit,
+                },
+                "preparing",
+            )
+            .map_err(|(_, error)| error)?;
+        let new_id = prepared.run_id.clone();
+        if let Some(patch) = prior_patch
+            && let Err(error) =
+                self.git
+                    .restore_snapshot(&prepared.worktree, &task.base_revision, &patch.patch)
+        {
+            self.ports.release(prepared.port);
+            let _ = self.mark_preparation_failed(&task, &new_id);
+            return Err(error);
+        }
+        let update = (|| -> Result<(), CommandError> {
+            let mut connection = self.database.connect()?;
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "UPDATE agent_runs SET retry_of_run_id=?1 WHERE id=?2",
+                params![id, new_id],
+            )?;
+            transaction.execute(
+                "UPDATE agent_runs SET depends_on_run_ids_json=replace(depends_on_run_ids_json,json_quote(?1),json_quote(?2)) WHERE task_id=?3 AND status='queued' AND EXISTS(SELECT 1 FROM json_each(depends_on_run_ids_json) WHERE value=?1)",
+                params![id, new_id, task.id],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        if let Err(error) = update {
+            self.ports.release(prepared.port);
+            let _ = self.mark_preparation_failed(&task, &new_id);
+            return Err(error);
+        }
+        self.launch(prepared, channel)?;
+        self.get(&new_id)?
+            .ok_or_else(|| CommandError::new("run_not_found", "Re-run was not created"))
+    }
+
+    pub(crate) fn pause_for_checkpoint(&self, id: &str) -> Result<(), CommandError> {
+        let run = self
+            .get(id)?
+            .ok_or_else(|| CommandError::new("run_not_found", "Run was not found"))?;
+        if !matches!(run.status.as_str(), "preparing" | "running" | "waiting") {
+            return Ok(());
+        }
+        if !run.can_resume {
+            return Err(CommandError::new(
+                "checkpoint_unsupported",
+                "This provider cannot resume the session after a checkpoint",
+            ));
+        }
+        self.processes.stop(id)?;
+        for _ in 0..40 {
+            if !self.processes.is_active(id) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        Err(CommandError::new(
+            "checkpoint_timeout",
+            "The agent did not pause; its worktree was left unchanged",
+        ))
+    }
+
     fn start(
         &self,
         input: StartInput,
@@ -379,6 +537,7 @@ impl RunService {
         }
         let task = tasks::get(&self.database, &input.task_id)?
             .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
+        ensure_usage_available(&self.database, &task.id, None)?;
         let project_path: PathBuf = self
             .database
             .connect()?
@@ -425,7 +584,14 @@ impl RunService {
         let result = (|| {
             if !matches!(
                 assignment.role.as_str(),
-                "planner" | "executor" | "research" | "test" | "reviewer"
+                "planner"
+                    | "executor"
+                    | "implementer"
+                    | "research"
+                    | "test"
+                    | "tester"
+                    | "reviewer"
+                    | "debugger"
             ) {
                 return Err(CommandError::new(
                     "invalid_run_role",
@@ -447,6 +613,11 @@ impl RunService {
             manifest.sha256 = context_sha256.clone();
             manifest.total_bytes = assignment.approved_context.len();
             let provider = providers::resolve(&self.database, &assignment.provider_id)?;
+            let unit_limit = assignment
+                .unit_limit
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| CommandError::new("invalid_unit_limit", "Usage limit is too large"))?;
             if assignment.full_access {
                 provider.ensure_full_access_supported()?;
             }
@@ -464,7 +635,7 @@ impl RunService {
             fs::create_dir_all(&run_dir).map_err(io_error)?;
             let mut connection = self.database.connect()?;
             let transaction = connection.transaction()?;
-            transaction.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,assignment_title,status,merge_order,raw_log_path,context_pack_path,context_manifest_json,context_sha256,provider_session_id,full_access,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?9,?10,?11,?12,?13,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'))",params![run_id,task.id,provider.id,assignment.instruction,assignment.role,assignment.title,initial_status,log.to_string_lossy(),context_path.to_string_lossy(),serde_json::to_string(&manifest).unwrap(),context_sha256,provider_session_id,assignment.full_access])?;
+            transaction.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,assignment_title,status,merge_order,raw_log_path,context_pack_path,context_manifest_json,context_sha256,provider_session_id,full_access,unit_limit,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?9,?10,?11,?12,?13,?14,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'))",params![run_id,task.id,provider.id,assignment.instruction,assignment.role,assignment.title,initial_status,log.to_string_lossy(),context_path.to_string_lossy(),serde_json::to_string(&manifest).unwrap(),context_sha256,provider_session_id,assignment.full_access,unit_limit])?;
             timeline::append(
                 &transaction,
                 EventRefs {
@@ -559,8 +730,12 @@ impl RunService {
         if other_active > 0 {
             return Ok(false);
         }
+        connection.execute(
+            "UPDATE agent_runs AS queued SET waiting_reason=CASE WHEN EXISTS(SELECT 1 FROM json_each(queued.depends_on_run_ids_json) dependency JOIN agent_runs required ON required.id=dependency.value WHERE required.status<>'succeeded') THEN 'Waiting for prerequisite agent' ELSE NULL END WHERE queued.task_id=?1 AND queued.status='queued'",
+            [task_id],
+        )?;
         let mut statement = connection.prepare(
-            "SELECT id FROM agent_runs WHERE task_id=?1 AND status='queued' ORDER BY created_at",
+            "SELECT queued.id FROM agent_runs queued WHERE queued.task_id=?1 AND queued.status='queued' AND NOT EXISTS(SELECT 1 FROM json_each(queued.depends_on_run_ids_json) dependency JOIN agent_runs required ON required.id=dependency.value WHERE required.status<>'succeeded') ORDER BY queued.created_at",
         )?;
         let ids = statement
             .query_map([task_id], |row| row.get::<_, String>(0))?
@@ -666,7 +841,7 @@ impl RunService {
         }
         let task_id: Option<String> = connection
             .query_row(
-                "SELECT t.id FROM tasks t WHERE t.project_id=?1 AND EXISTS(SELECT 1 FROM agent_runs r WHERE r.task_id=t.id AND r.status='queued') ORDER BY t.queue_position,t.created_at LIMIT 1",
+                "SELECT t.id FROM tasks t WHERE t.project_id=?1 AND EXISTS(SELECT 1 FROM agent_runs r WHERE r.task_id=t.id AND r.status='queued' AND NOT EXISTS(SELECT 1 FROM json_each(r.depends_on_run_ids_json) dependency JOIN agent_runs required ON required.id=dependency.value WHERE required.status<>'succeeded')) ORDER BY t.queue_position,t.created_at LIMIT 1",
                 [project_id],
                 |row| row.get(0),
             )
@@ -691,7 +866,7 @@ impl RunService {
             return Ok(None);
         };
         let assignments = {
-            let mut statement = connection.prepare("SELECT id,title,instruction,role,allowed_paths_json,position FROM task_plan_assignments WHERE plan_id=?1 ORDER BY position")?;
+            let mut statement = connection.prepare("SELECT id,title,instruction,role,allowed_paths_json,depends_on_json,position FROM task_plan_assignments WHERE plan_id=?1 ORDER BY position")?;
             statement
                 .query_map([&id], |row| {
                     Ok(TaskPlanAssignment {
@@ -701,7 +876,9 @@ impl RunService {
                         role: row.get(3)?,
                         allowed_paths: serde_json::from_str(&row.get::<_, String>(4)?)
                             .unwrap_or_default(),
-                        position: row.get(5)?,
+                        depends_on: serde_json::from_str(&row.get::<_, String>(5)?)
+                            .unwrap_or_default(),
+                        position: row.get(6)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -838,7 +1015,7 @@ impl RunService {
         };
         let assignments = {
             let mut statement = connection.prepare(
-                "SELECT title,instruction,role,allowed_paths_json FROM task_plan_assignments WHERE plan_id=?1 ORDER BY position",
+                "SELECT title,instruction,role,allowed_paths_json,depends_on_json FROM task_plan_assignments WHERE plan_id=?1 ORDER BY position",
             )?;
             statement
                 .query_map([&plan_id], |row| {
@@ -847,6 +1024,8 @@ impl RunService {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         serde_json::from_str::<Vec<String>>(&row.get::<_, String>(3)?)
+                            .unwrap_or_default(),
+                        serde_json::from_str::<Vec<String>>(&row.get::<_, String>(4)?)
                             .unwrap_or_default(),
                     ))
                 })?
@@ -860,8 +1039,12 @@ impl RunService {
                 "Configure at least one coding CLI before launching the plan",
             ));
         }
+        let dependencies = assignments
+            .iter()
+            .map(|(title, _, _, _, dependencies)| (title.clone(), dependencies.clone()))
+            .collect::<Vec<_>>();
         let mut prepared = Vec::new();
-        for (position, (title, instruction, role, allowed_paths)) in
+        for (position, (title, instruction, role, allowed_paths, _)) in
             assignments.into_iter().enumerate()
         {
             let instruction = if allowed_paths.is_empty() {
@@ -892,15 +1075,38 @@ impl RunService {
                 approved_context: preview.content,
                 environment_files: Vec::new(),
                 full_access,
+                unit_limit: None,
             });
         }
-        self.start(
-            StartInput {
-                task_id: task_id.clone(),
-                assignments: prepared,
-            },
-            channel,
-        )?;
+        let runs = self.enqueue(StartInput {
+            task_id: task_id.clone(),
+            assignments: prepared,
+        })?;
+        let run_ids = runs
+            .iter()
+            .filter_map(|run| {
+                run.title
+                    .as_ref()
+                    .map(|title| (title.to_lowercase(), run.id.clone()))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut connection = self.database.connect()?;
+        let transaction = connection.transaction()?;
+        for (title, dependency_titles) in dependencies {
+            let run_id = run_ids.get(&title.to_lowercase()).ok_or_else(|| {
+                CommandError::new("plan_run_not_found", "A planned Run was not created")
+            })?;
+            let dependencies = dependency_titles
+                .iter()
+                .filter_map(|dependency| run_ids.get(&dependency.to_lowercase()).cloned())
+                .collect::<Vec<_>>();
+            transaction.execute(
+                "UPDATE agent_runs SET depends_on_run_ids_json=?1,waiting_reason=CASE WHEN json_array_length(?1)>0 THEN 'Waiting for prerequisite agent' ELSE NULL END WHERE id=?2",
+                params![serde_json::to_string(&dependencies).unwrap(), run_id],
+            )?;
+        }
+        transaction.commit()?;
+        self.dispatch_task(&task_id, channel)?;
         self.database.connect()?.execute(
             "UPDATE task_plans SET status='launched',launched_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND status='proposed'",
             [&plan_id],
@@ -1131,6 +1337,30 @@ impl RunService {
                             |row| row.get(0),
                         )
                         .unwrap_or(reported_status);
+                    if reported_status == "succeeded"
+                        && let Ok(Some(exceeded)) =
+                            exceeded_usage(&transaction, &event_task_id, Some(&event_run_id), false)
+                    {
+                        let _ = transaction.execute(
+                            "UPDATE agent_runs SET status='failed',waiting_reason=?1 WHERE id=?2",
+                            params![
+                                format!("{} usage limit exceeded", exceeded.scope),
+                                event_run_id
+                            ],
+                        );
+                        reported_status = "failed".into();
+                        let _ = timeline::append(
+                            &transaction,
+                            EventRefs {
+                                project_id: &event_project_id,
+                                task_id: Some(&event_task_id),
+                                run_id: Some(&event_run_id),
+                                provider_id: Some(&event_provider_id),
+                            },
+                            "budget.exceeded",
+                            serde_json::json!({ "scope": exceeded.scope, "used": exceeded.used, "limit": exceeded.limit }),
+                        );
+                    }
                     let _ = timeline::append(
                         &transaction,
                         EventRefs {
@@ -1172,6 +1402,7 @@ impl RunService {
                         _ => {}
                     }
                 }
+                let _ = dispatcher.dispatch_task(&event_task_id, event_channel.clone());
                 let _ = dispatcher.dispatch_next(&event_project_id, event_channel.clone());
             }
         });
@@ -1234,17 +1465,28 @@ impl RunService {
         Ok(())
     }
 
-    fn list(&self, task_id: &str) -> Result<Vec<Run>, CommandError> {
+    pub(crate) fn list(&self, task_id: &str) -> Result<Vec<Run>, CommandError> {
         let connection = self.database.connect()?;
-        let mut statement=connection.prepare("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access,r.reported_input_units,r.reported_output_units FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.task_id=?1 ORDER BY r.created_at")?;
+        let mut statement=connection.prepare("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access,r.reported_input_units,r.reported_output_units,r.depends_on_run_ids_json,r.retry_of_run_id,r.unit_limit FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.task_id=?1 ORDER BY r.created_at")?;
         statement
             .query_map([task_id], row_to_run)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+    pub(crate) fn list_project(&self, project_id: &str) -> Result<Vec<Run>, CommandError> {
+        let connection = self.database.connect()?;
+        let mut statement=connection.prepare("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access,r.reported_input_units,r.reported_output_units,r.depends_on_run_ids_json,r.retry_of_run_id,r.unit_limit FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE t.project_id=?1 ORDER BY r.created_at")?;
+        statement
+            .query_map([project_id], row_to_run)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+    pub(crate) fn usage(&self, run_id: &str) -> process::ProcessUsage {
+        self.processes.usage(run_id)
+    }
     fn get(&self, id: &str) -> Result<Option<Run>, CommandError> {
         let connection = self.database.connect()?;
-        connection.query_row("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access,r.reported_input_units,r.reported_output_units FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.id=?1",[id],row_to_run).optional().map_err(Into::into)
+        connection.query_row("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access,r.reported_input_units,r.reported_output_units,r.depends_on_run_ids_json,r.retry_of_run_id,r.unit_limit FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.id=?1",[id],row_to_run).optional().map_err(Into::into)
     }
     fn stop(&self, id: &str) -> Result<(), CommandError> {
         let run = self
@@ -1252,6 +1494,7 @@ impl RunService {
             .ok_or_else(|| CommandError::new("run_not_found", "Run was not found"))?;
         let task = tasks::get(&self.database, &run.task_id)?
             .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
+        ensure_usage_available(&self.database, &task.id, Some(id))?;
         if !matches!(
             run.status.as_str(),
             "queued" | "preparing" | "running" | "waiting"
@@ -1445,6 +1688,84 @@ impl RunService {
     }
 }
 
+struct ExceededUsage {
+    scope: &'static str,
+    used: i64,
+    limit: i64,
+}
+
+fn exceeded_usage(
+    connection: &rusqlite::Connection,
+    task_id: &str,
+    run_id: Option<&str>,
+    at_limit: bool,
+) -> Result<Option<ExceededUsage>, rusqlite::Error> {
+    let reached = |used: i64, limit: i64| used > limit || (at_limit && used == limit);
+    let (project_limit, task_limit, project_used, task_used): (
+        Option<i64>,
+        Option<i64>,
+        i64,
+        i64,
+    ) = connection.query_row(
+        "SELECT p.unit_limit,t.unit_limit,(SELECT COALESCE(SUM(COALESCE(r.reported_input_units,0)+COALESCE(r.reported_output_units,0)),0) FROM agent_runs r JOIN tasks used_task ON used_task.id=r.task_id WHERE used_task.project_id=t.project_id),(SELECT COALESCE(SUM(COALESCE(reported_input_units,0)+COALESCE(reported_output_units,0)),0) FROM agent_runs WHERE task_id=t.id) FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?1",
+        [task_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    if let Some(limit) = project_limit
+        && reached(project_used, limit)
+    {
+        return Ok(Some(ExceededUsage {
+            scope: "Project",
+            used: project_used,
+            limit,
+        }));
+    }
+    if let Some(limit) = task_limit
+        && reached(task_used, limit)
+    {
+        return Ok(Some(ExceededUsage {
+            scope: "Task",
+            used: task_used,
+            limit,
+        }));
+    }
+    if let Some(run_id) = run_id {
+        let (limit, used): (Option<i64>, i64) = connection.query_row(
+            "SELECT unit_limit,COALESCE(reported_input_units,0)+COALESCE(reported_output_units,0) FROM agent_runs WHERE id=?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if let Some(limit) = limit
+            && reached(used, limit)
+        {
+            return Ok(Some(ExceededUsage {
+                scope: "Agent",
+                used,
+                limit,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn ensure_usage_available(
+    database: &Database,
+    task_id: &str,
+    run_id: Option<&str>,
+) -> Result<(), CommandError> {
+    let connection = database.connect()?;
+    let Some(exceeded) = exceeded_usage(&connection, task_id, run_id, true)? else {
+        return Ok(());
+    };
+    Err(CommandError::new(
+        "usage_limit_exceeded",
+        format!(
+            "{} usage is {} units with a {} unit limit. Raise the limit before starting more work.",
+            exceeded.scope, exceeded.used, exceeded.limit
+        ),
+    ))
+}
+
 fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
     let manifest: Option<String> = row.get(12)?;
     let port = manifest
@@ -1476,6 +1797,11 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
         reported_output_tokens: row
             .get::<_, Option<i64>>(19)?
             .and_then(|tokens| u64::try_from(tokens).ok()),
+        depends_on_run_ids: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or_default(),
+        retry_of_run_id: row.get(21)?,
+        unit_limit: row
+            .get::<_, Option<i64>>(22)?
+            .and_then(|units| u64::try_from(units).ok()),
     })
 }
 fn default_role() -> String {
@@ -1539,6 +1865,10 @@ fn base_environment(home: &Path, port: u16, inherit_user_home: bool) -> Vec<(Str
 }
 fn io_error(error: std::io::Error) -> CommandError {
     CommandError::new("filesystem_error", error.to_string())
+}
+
+fn json_error(error: serde_json::Error) -> CommandError {
+    CommandError::new("invalid_stored_data", error.to_string())
 }
 
 #[cfg(all(test, unix))]
@@ -1696,7 +2026,7 @@ mod tests {
         let executable = root.path().join("stand-in");
         fs::write(
             &executable,
-            "#!/bin/sh\ncase \"$1:$ANTHROPIC_API_KEY\" in first:alpha-secret|resume:alpha-secret|second:beta-secret) ;; *) printf 'cross-account credential\\n'; exit 2;; esac\nprintf 'argc:%s mode:%s session:%s config:%s secret:%s\\n' \"$#\" \"$1\" \"$2\" \"$CLAUDE_CONFIG_DIR\" \"$ANTHROPIC_API_KEY\"\nsleep 0.4\nprintf '{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\\nfinished\\n'\n",
+            "#!/bin/sh\ncase \"$1:$ANTHROPIC_API_KEY\" in first:alpha-secret|resume:alpha-secret|second:beta-secret) ;; *) printf 'cross-account credential\\n'; exit 2;; esac\nprintf 'argc:%s mode:%s session:%s config:%s secret:%s\\n' \"$#\" \"$1\" \"$2\" \"$CLAUDE_CONFIG_DIR\" \"$ANTHROPIC_API_KEY\"\ncase \"$1:$ANTHROPIC_API_KEY:$3\" in first:alpha-secret:*'Parallel fixture'*) sleep 5;; *) sleep 0.2;; esac\nprintf '{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\\nfinished\\n'\n",
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1781,6 +2111,7 @@ mod tests {
             approved_context: preview.content,
             environment_files: vec![],
             full_access: false,
+            unit_limit: None,
         };
         let runs = service
             .start(
@@ -1915,6 +2246,49 @@ mod tests {
                 .as_ref()
                 .is_some_and(|path| Path::new(path).exists())
         }));
+        let retry_source = service.list(&queued_task.id).unwrap().remove(0);
+        database.connect().unwrap().execute(
+            "INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,depends_on_run_ids_json,created_at,updated_at) VALUES('retry-dependent',?1,?2,'Wait for retry','queued',?3,'now','now')",
+            params![queued_task.id, profile.id, serde_json::json!([retry_source.id]).to_string()],
+        ).unwrap();
+        fs::write(
+            Path::new(retry_source.worktree_path.as_ref().unwrap()).join("retry.txt"),
+            "preserved state",
+        )
+        .unwrap();
+        let retried = service
+            .retry(&retry_source.id, Channel::new(|_| Ok(())))
+            .unwrap();
+        assert_eq!(
+            retried.retry_of_run_id.as_deref(),
+            Some(retry_source.id.as_str())
+        );
+        let dependency: String = database
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT depends_on_run_ids_json FROM agent_runs WHERE id='retry-dependent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&dependency).unwrap(),
+            std::slice::from_ref(&retried.id)
+        );
+        database
+            .connect()
+            .unwrap()
+            .execute("DELETE FROM agent_runs WHERE id='retry-dependent'", [])
+            .unwrap();
+        assert_ne!(retried.worktree_path, retry_source.worktree_path);
+        assert_eq!(
+            fs::read_to_string(
+                Path::new(retried.worktree_path.as_ref().unwrap()).join("retry.txt")
+            )
+            .unwrap(),
+            "preserved state"
+        );
 
         let automatic_task = tasks::create(
             CreateTask {
@@ -1947,12 +2321,14 @@ mod tests {
                         instruction: "Inspect the frontend".into(),
                         role: "executor".into(),
                         allowed_paths: vec!["README.md".into()],
+                        depends_on: vec![],
                     },
                     PlanAssignment {
                         title: "Tests".into(),
                         instruction: "Inspect test coverage".into(),
                         role: "test".into(),
                         allowed_paths: vec!["README.md".into()],
+                        depends_on: vec!["Frontend".into()],
                     },
                 ],
             },
@@ -1975,6 +2351,20 @@ mod tests {
         assert_ne!(
             automatic_runs[1].worktree_path,
             automatic_runs[2].worktree_path
+        );
+        let frontend = automatic_runs
+            .iter()
+            .find(|run| run.title.as_deref() == Some("Frontend"))
+            .unwrap();
+        let tests = automatic_runs
+            .iter()
+            .find(|run| run.title.as_deref() == Some("Tests"))
+            .unwrap();
+        assert_eq!(tests.status, "queued");
+        assert_eq!(tests.depends_on_run_ids, std::slice::from_ref(&frontend.id));
+        assert_eq!(
+            tests.waiting_reason.as_deref(),
+            Some("Waiting for prerequisite agent")
         );
         for _ in 0..50 {
             if service

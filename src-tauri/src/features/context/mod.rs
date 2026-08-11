@@ -96,6 +96,16 @@ pub fn take(drafts: &ContextDrafts, token: &str) -> Result<ContextManifest, Comm
         })
 }
 
+pub(crate) fn restore(drafts: &ContextDrafts, manifest: ContextManifest) -> String {
+    let token = Uuid::new_v4().to_string();
+    drafts
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(token.clone(), manifest);
+    token
+}
+
 pub(crate) fn build(
     input: PreviewInput,
     database: &Database,

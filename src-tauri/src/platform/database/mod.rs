@@ -63,13 +63,17 @@ mod tests {
 
     const EXPECTED_TABLES: &[&str] = &[
         "agent_runs",
+        "agent_templates",
         "app_settings",
         "approval_requests",
         "attention_acknowledgements",
+        "bookmarks",
         "conflict_flags",
         "context_shares",
+        "environment_profiles",
         "generic_provider_profiles",
         "merge_attempts",
+        "merge_queue",
         "notification_deliveries",
         "projects",
         "provider_accounts",
@@ -80,6 +84,7 @@ mod tests {
         "task_plans",
         "tasks",
         "timeline_events",
+        "workspace_snapshots",
         "worktrees",
     ];
 
@@ -148,7 +153,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(database.schema_version().unwrap(), 10);
+        assert_eq!(database.schema_version().unwrap(), 11);
     }
 
     #[test]
