@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path};
+use std::{thread, time::Duration};
 
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,11 @@ pub struct ApprovalRequest {
     pub requested_by: String,
     pub created_at: String,
     pub decided_at: Option<String>,
+    pub execution_status: String,
+    pub execution_result: Option<Value>,
+    pub execution_error_code: Option<String>,
+    pub execution_error_message: Option<String>,
+    pub executed_at: Option<String>,
 }
 
 #[tauri::command]
@@ -143,14 +149,6 @@ pub fn workspace_submit_plan(
     database: State<Database>,
 ) -> Result<String, CommandError> {
     submit_plan(&database, input)
-}
-
-#[tauri::command]
-pub fn workspace_decide_action(
-    input: DecisionInput,
-    database: State<Database>,
-) -> Result<ApprovalRequest, CommandError> {
-    decide(&database, &input.request_id, &input.decision)
 }
 
 #[tauri::command]
@@ -199,14 +197,13 @@ pub fn snapshot(database: &Database, run_id: &str) -> Result<WorkspaceSnapshot, 
 }
 
 pub fn request(database: &Database, input: RequestInput) -> Result<ApprovalRequest, CommandError> {
-    const ACTIONS: [&str; 7] = [
+    const ACTIONS: [&str; 6] = [
         "start_run",
         "share_context",
         "create_branch",
         "clean_resources",
         "approve_task",
         "merge_task",
-        "update_task_status",
     ];
     if !ACTIONS.contains(&input.action.as_str()) {
         return Err(CommandError::new(
@@ -542,7 +539,7 @@ pub fn decide(
         &format!("approval.{status}"),
         serde_json::json!({"requestId":id,"action":request.action}),
     )?;
-    if status != "expired"
+    if status != "approved"
         && let Some(run_id) = request.run_id.as_deref()
     {
         let changed = transaction.execute("UPDATE agent_runs SET status='running',waiting_reason=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND status='waiting'", [run_id])?;
@@ -570,19 +567,20 @@ fn list_approvals(
     project_id: &str,
 ) -> Result<Vec<ApprovalRequest>, CommandError> {
     let connection = database.connect()?;
-    let mut statement = connection.prepare("SELECT id,project_id,task_id,agent_run_id,action,arguments_json,status,requested_by,created_at,decided_at FROM approval_requests WHERE project_id=?1 ORDER BY created_at DESC LIMIT 500")?;
+    let mut statement = connection.prepare("SELECT id,project_id,task_id,agent_run_id,action,arguments_json,status,requested_by,created_at,decided_at,execution_status,execution_result_json,execution_error_code,execution_error_message,executed_at FROM approval_requests WHERE project_id=?1 ORDER BY created_at DESC LIMIT 500")?;
     statement
         .query_map([project_id], row_to_approval)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
-fn get_approval(database: &Database, id: &str) -> Result<ApprovalRequest, CommandError> {
-    database.connect()?.query_row("SELECT id,project_id,task_id,agent_run_id,action,arguments_json,status,requested_by,created_at,decided_at FROM approval_requests WHERE id=?1", [id], row_to_approval).optional()?.ok_or_else(|| CommandError::new("approval_not_found", "Approval request was not found"))
+pub(crate) fn get_approval(database: &Database, id: &str) -> Result<ApprovalRequest, CommandError> {
+    database.connect()?.query_row("SELECT id,project_id,task_id,agent_run_id,action,arguments_json,status,requested_by,created_at,decided_at,execution_status,execution_result_json,execution_error_code,execution_error_message,executed_at FROM approval_requests WHERE id=?1", [id], row_to_approval).optional()?.ok_or_else(|| CommandError::new("approval_not_found", "Approval request was not found"))
 }
 
 fn row_to_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest> {
     let arguments: String = row.get(5)?;
+    let result: Option<String> = row.get(11)?;
     Ok(ApprovalRequest {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -594,7 +592,73 @@ fn row_to_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest>
         requested_by: row.get(7)?,
         created_at: row.get(8)?,
         decided_at: row.get(9)?,
+        execution_status: row.get(10)?,
+        execution_result: result.and_then(|value| serde_json::from_str(&value).ok()),
+        execution_error_code: row.get(12)?,
+        execution_error_message: row.get(13)?,
+        executed_at: row.get(14)?,
     })
+}
+
+pub(crate) fn claim_execution(database: &Database, id: &str) -> Result<bool, CommandError> {
+    Ok(database.connect()?.execute(
+        "UPDATE approval_requests SET execution_status='running' WHERE id=?1 AND status='approved' AND execution_status='not_started'",
+        [id],
+    )? == 1)
+}
+
+pub(crate) fn finish_execution(
+    database: &Database,
+    request: &ApprovalRequest,
+    result: Result<Value, CommandError>,
+) -> Result<ApprovalRequest, CommandError> {
+    let mut connection = database.connect()?;
+    let transaction = connection.transaction()?;
+    match result {
+        Ok(value) => {
+            transaction.execute(
+                "UPDATE approval_requests SET execution_status='succeeded',execution_result_json=?1,executed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?2 AND execution_status='running'",
+                params![serde_json::to_string(&value).unwrap_or_else(|_| "null".into()), request.id],
+            )?;
+            if let Some(run_id) = request.run_id.as_deref() {
+                transaction.execute("UPDATE agent_runs SET status='running',waiting_reason=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND status='waiting'", [run_id])?;
+                tasks::rollup_in_transaction(&transaction, &request.task_id)?;
+            }
+            timeline::append(
+                &transaction,
+                EventRefs {
+                    project_id: &request.project_id,
+                    task_id: Some(&request.task_id),
+                    run_id: request.run_id.as_deref(),
+                    provider_id: None,
+                },
+                "approval.executed",
+                serde_json::json!({"requestId":request.id,"action":request.action}),
+            )?;
+        }
+        Err(error) => {
+            transaction.execute(
+                "UPDATE approval_requests SET execution_status='failed',execution_error_code=?1,execution_error_message=?2,executed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?3 AND execution_status='running'",
+                params![error.code, error.message, request.id],
+            )?;
+            if let Some(run_id) = request.run_id.as_deref() {
+                transaction.execute("UPDATE agent_runs SET waiting_reason=?1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?2 AND status='waiting'", params![format!("Approved action failed: {}", error.message), run_id])?;
+            }
+            timeline::append(
+                &transaction,
+                EventRefs {
+                    project_id: &request.project_id,
+                    task_id: Some(&request.task_id),
+                    run_id: request.run_id.as_deref(),
+                    provider_id: None,
+                },
+                "approval.execution_failed",
+                serde_json::json!({"requestId":request.id,"action":request.action,"code":error.code,"message":error.message}),
+            )?;
+        }
+    }
+    transaction.commit()?;
+    get_approval(database, &request.id)
 }
 
 pub fn run_adapter() -> Result<bool, String> {
@@ -624,17 +688,17 @@ pub fn run_adapter() -> Result<bool, String> {
                 .transpose()
                 .map_err(|error| error.to_string())?
                 .unwrap_or_else(|| serde_json::json!({}));
-            serde_json::to_value(
-                request(
+            serde_json::to_value(wait_for_decision(
+                &database,
+                &request(
                     &database,
                     RequestInput {
                         run_id,
                         action,
                         arguments,
                     },
-                )
-                .map_err(|error| error.message)?,
-            )
+                ).map_err(|error| error.message)?,
+            ).map_err(|error| error.message)?)
             .unwrap()
         }
         Some("report") => {
@@ -682,7 +746,7 @@ fn run_mcp(database: &Database, run_id: &str) -> Result<(), String> {
             }
             "tools/list" => serde_json::json!({"tools":[
                 {"name":"workspace_snapshot","description":"Read this Run's Task, sibling Runs, and attention state","inputSchema":{"type":"object","properties":{}}},
-                {"name":"request_action","description":"Create a visible human approval request; does not execute it","inputSchema":{"type":"object","required":["action","arguments"],"properties":{"action":{"type":"string"},"arguments":{"type":"object"}}}},
+                {"name":"request_action","description":"Request a visible human-approved application command and wait for its result","inputSchema":{"type":"object","required":["action","arguments"],"properties":{"action":{"type":"string"},"arguments":{"type":"object"}}}},
                 {"name":"report_activity","description":"Publish explicitly agent-authored progress without changing lifecycle state","inputSchema":{"type":"object","required":["kind","detail"],"properties":{"kind":{"enum":["progress","validation","changed_path"]},"detail":{"type":"string"}}}}
                 ,{"name":"submit_plan","description":"Planner only: name the Task and submit 1-8 independent, non-recursive assignments for SubShell to launch","inputSchema":{"type":"object","required":["assignments"],"properties":{"taskTitle":{"type":"string","maxLength":72},"summary":{"type":"string"},"assignments":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"object","required":["title","instruction"],"properties":{"title":{"type":"string"},"instruction":{"type":"string"},"role":{"enum":["executor","research","test","reviewer"]},"allowedPaths":{"type":"array","items":{"type":"string"}}}}}}}}
             ]}),
@@ -746,7 +810,7 @@ fn request_action_from_mcp(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
-    request(
+    let request = request(
         database,
         RequestInput {
             run_id: run_id.into(),
@@ -754,7 +818,23 @@ fn request_action_from_mcp(
             arguments: action_arguments,
         },
     )
-    .map_err(|error| error.message)
+    .map_err(|error| error.message)?;
+    wait_for_decision(database, &request).map_err(|error| error.message)
+}
+
+fn wait_for_decision(
+    database: &Database,
+    request: &ApprovalRequest,
+) -> Result<ApprovalRequest, CommandError> {
+    loop {
+        let current = get_approval(database, &request.id)?;
+        if matches!(current.status.as_str(), "denied" | "expired")
+            || matches!(current.execution_status.as_str(), "succeeded" | "failed")
+        {
+            return Ok(current);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn report_activity_from_mcp(

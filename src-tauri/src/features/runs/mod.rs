@@ -385,6 +385,45 @@ struct Prepared {
 }
 
 impl RunService {
+    pub(crate) fn start_approved(&self, input: StartInput) -> Result<Vec<Run>, CommandError> {
+        self.start(input, Channel::new(|_| Ok(())))
+    }
+
+    pub(crate) fn clean_resources(&self, id: &str) -> Result<(), CommandError> {
+        let run = self
+            .get(id)?
+            .ok_or_else(|| CommandError::new("run_not_found", "Run was not found"))?;
+        let project_path: PathBuf = self
+            .database
+            .connect()?
+            .query_row(
+                "SELECT p.path FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?1",
+                [&run.task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map(PathBuf::from)?;
+        if self.processes.is_active(id) {
+            self.processes.stop(id)?;
+        }
+        if let Some(path) = run.worktree_path.as_deref() {
+            self.git.remove_worktree(&project_path, Path::new(path))?;
+        }
+        let config = self.paths.data_dir.join("runs").join(id).join("config");
+        if config.exists() {
+            fs::remove_dir_all(config).map_err(io_error)?;
+        }
+        if let Some(port) = run.port {
+            self.ports.release(port);
+        }
+        let mut connection = self.database.connect()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("UPDATE agent_runs SET status='cancelled',waiting_reason=NULL,ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1", [id])?;
+        transaction.execute("UPDATE worktrees SET state='discarded',cleaned_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_run_id=?1", [id])?;
+        tasks::rollup_in_transaction(&transaction, &run.task_id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     fn retry(&self, id: &str, channel: Channel<RunStreamEvent>) -> Result<Run, CommandError> {
         let previous = self
             .get(id)?

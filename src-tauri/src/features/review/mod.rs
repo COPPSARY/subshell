@@ -234,7 +234,7 @@ pub(crate) fn get_or_create(
         .ok_or_else(|| CommandError::new("review_not_found", "Review was not created"))
 }
 
-fn decide(
+pub(crate) fn decide(
     input: ReviewDecisionInput,
     decision: &str,
     database: &Database,

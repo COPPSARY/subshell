@@ -172,7 +172,11 @@ pub fn get(database: &Database, id: &str) -> Result<Option<Task>, CommandError> 
     connection.query_row("SELECT id,project_id,title,description,status,queue_position,base_branch,base_revision,acceptance_criteria_json,allowed_paths_json,validation_commands_json,decisions_json,updated_at FROM tasks WHERE id=?1",[id],|row|Ok(Task{id:row.get(0)?,project_id:row.get(1)?,title:row.get(2)?,description:row.get(3)?,status:row.get(4)?,queue_position:row.get(5)?,base_branch:row.get(6)?,base_revision:row.get(7)?,acceptance_criteria:parse(row.get(8)?),allowed_paths:parse(row.get(9)?),validation_commands:parse(row.get(10)?),decisions:parse(row.get(11)?),updated_at:row.get(12)?})).optional().map_err(Into::into)
 }
 
-fn update_status(database: &Database, id: &str, status: &str) -> Result<Task, CommandError> {
+pub(crate) fn update_status(
+    database: &Database,
+    id: &str,
+    status: &str,
+) -> Result<Task, CommandError> {
     const STATUSES: [&str; 11] = [
         "idea",
         "task",

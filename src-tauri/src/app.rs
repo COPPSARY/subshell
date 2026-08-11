@@ -4,7 +4,7 @@ use tauri::{Emitter, Manager};
 
 use crate::{
     features::{
-        agent_api, attention,
+        agent_actions, agent_api, attention,
         context::{self, ContextDrafts},
         context_sharing, health,
         preview::{self, PreviewService},
@@ -120,7 +120,7 @@ pub fn run() {
             agent_api::workspace_request_action,
             agent_api::workspace_report_activity,
             agent_api::workspace_submit_plan,
-            agent_api::workspace_decide_action,
+            agent_actions::workspace_decide_action,
             agent_api::workspace_list_approvals,
             workspace::workspace_templates_list,
             workspace::workspace_template_save,
