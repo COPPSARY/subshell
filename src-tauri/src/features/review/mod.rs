@@ -311,14 +311,7 @@ pub(crate) fn merge(
     }
     let task = tasks::get(database, &review.task_id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
-    let current = capture_runs(database, git, &task)?;
-    let evidence = validation_evidence(database, &task.id)?;
-    if fingerprint(&task.base_revision, &current, &evidence)? != review.fingerprint {
-        return Err(CommandError::new(
-            "review_stale",
-            "Agent changes changed after approval; assemble a new review",
-        ));
-    }
+    verify_stored_patches(&review)?;
     let project_path = project_path(database, &task.project_id)?;
     let target = git.status(&project_path)?;
     if target.branch.as_deref() != Some(&task.base_branch)
@@ -382,7 +375,6 @@ pub(crate) fn verified_review(
     attempt_id: &str,
     expected_fingerprint: &str,
     database: &Database,
-    git: &GitService,
 ) -> Result<VerifiedReview, CommandError> {
     let review = review_by_id(database, attempt_id)?;
     if review.fingerprint != expected_fingerprint {
@@ -391,19 +383,31 @@ pub(crate) fn verified_review(
             "The visible review is not the requested preview",
         ));
     }
-    let task = reviewable_task(database, &review.task_id)?;
-    let evidence = validation_evidence(database, &task.id)?;
-    let current = capture_runs(database, git, &task)?;
-    if fingerprint(&task.base_revision, &current, &evidence)? != review.fingerprint {
-        return Err(CommandError::new(
-            "review_stale",
-            "Agent changes changed after this review was assembled",
-        ));
-    }
+    let task = tasks::get(database, &review.task_id)?
+        .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
+    verify_stored_patches(&review)?;
     Ok(VerifiedReview {
         project_path: project_path(database, &task.project_id)?,
         review,
     })
+}
+
+fn verify_stored_patches(review: &Review) -> Result<(), CommandError> {
+    for run in &review.runs {
+        let patch = fs::read(&run.patch_path).map_err(|_| {
+            CommandError::new(
+                "review_artifact_missing",
+                "A saved review patch is unavailable; restore the SubShell data directory or assemble a new review",
+            )
+        })?;
+        if sha256(&patch) != run.patch_sha256 {
+            return Err(CommandError::new(
+                "review_corrupt",
+                "A saved review patch no longer matches its fingerprint",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn perform_merge(
@@ -499,13 +503,14 @@ fn perform_merge(
                 |row| row.get(0),
             )
             .optional()?;
-        if let Some(path) = path
-            && git.remove_worktree(project_path, Path::new(&path)).is_ok()
-        {
-            database.connect()?.execute(
-                "UPDATE worktrees SET state='merged',cleaned_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_run_id=?1",
-                [&run.run_id],
-            )?;
+        if let Some(path) = path {
+            let path = Path::new(&path);
+            if !path.exists() || git.remove_worktree(project_path, path).is_ok() {
+                database.connect()?.execute(
+                    "UPDATE worktrees SET state='merged',cleaned_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_run_id=?1",
+                    [&run.run_id],
+                )?;
+            }
         }
     }
     Ok(integrated)
@@ -1105,6 +1110,9 @@ mod tests {
                 "feedback":""
             }),
         );
+        for worktree in &worktrees {
+            git.remove_worktree(&repository, worktree).unwrap();
+        }
         let revision = invoke(
             &webview,
             "review_merge",

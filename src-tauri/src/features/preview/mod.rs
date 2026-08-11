@@ -147,12 +147,8 @@ impl PreviewService {
     }
 
     fn prepare(&self, input: PreparePreviewInput) -> Result<Preview, CommandError> {
-        let verified = review::verified_review(
-            &input.attempt_id,
-            &input.fingerprint,
-            &self.database,
-            &self.git,
-        )?;
+        let verified =
+            review::verified_review(&input.attempt_id, &input.fingerprint, &self.database)?;
         if let Some(existing) = self
             .sessions
             .lock()
@@ -1101,6 +1097,7 @@ mod tests {
             ("styles.css", "body{color:tomato}"),
             ("app.js", "console.log('combined')"),
         ];
+        let mut source_worktrees = Vec::new();
         for (index, (file, content)) in changes.iter().enumerate() {
             let run_id = format!("run-{index}");
             let worktree = root.path().join(format!("run-worktree-{index}"));
@@ -1108,8 +1105,12 @@ mod tests {
             fs::write(worktree.join(file), content).unwrap();
             connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,assignment_title,status,merge_order,context_sha256,created_at,updated_at) VALUES(?1,'task','provider','Implement','executor',?2,'succeeded',?3,?4,'now','now')", params![run_id, file, index as i64, format!("context-{index}")]).unwrap();
             connection.execute("INSERT INTO worktrees(id,agent_run_id,path,base_branch,base_revision,state,created_at) VALUES(?1,?2,?3,?4,?5,'active','now')", params![format!("worktree-{index}"), run_id, worktree.to_string_lossy(), branch, base]).unwrap();
+            source_worktrees.push(worktree);
         }
         let review = review::get_or_create("task", &database, &paths, &git).unwrap();
+        for worktree in source_worktrees {
+            git.remove_worktree(&repository, &worktree).unwrap();
+        }
         let service = PreviewService::new(
             database,
             paths,
