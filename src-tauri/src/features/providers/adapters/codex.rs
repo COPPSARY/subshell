@@ -1,4 +1,4 @@
-use super::{ProviderAdapter, ProviderCapabilities};
+use super::{ParsedOutput, ProviderAdapter, ProviderCapabilities, parse_output};
 
 pub struct Codex;
 pub static CODEX: Codex = Codex;
@@ -37,5 +37,17 @@ impl ProviderAdapter for Codex {
             reports_usage: false,
             interactive_input: true,
         }
+    }
+    fn parse_output(&self, output: &[u8]) -> ParsedOutput {
+        parse_output(output, &["not logged in", "401 unauthorized"])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_codex_auth_fixture() {
+        assert!(CODEX.parse_output(b"Not logged in").auth_required);
     }
 }

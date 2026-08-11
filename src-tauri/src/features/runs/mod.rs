@@ -151,6 +151,8 @@ pub struct Run {
     pub can_resume: bool,
     pub resume_count: u32,
     pub full_access: bool,
+    pub reported_input_tokens: Option<u64>,
+    pub reported_output_tokens: Option<u64>,
     pub port: Option<u16>,
     pub updated_at: String,
 }
@@ -1020,6 +1022,8 @@ impl RunService {
         let event_project_id = project_id.clone();
         let event_provider_id = provider_id.clone();
         let event_role = run.role.clone();
+        let event_log = run.log.clone();
+        let output_parser = run.provider;
         let event_channel = channel.clone();
         let dispatcher = self.clone();
         let sink = Arc::new(move |notice| match notice {
@@ -1031,12 +1035,37 @@ impl RunService {
                 });
             }
             ProcessNotice::Exited { success, .. } => {
+                let parsed = fs::read(&event_log)
+                    .map(|output| output_parser.parse_output(&output))
+                    .unwrap_or_default();
+                let input_tokens = parsed
+                    .usage
+                    .and_then(|usage| usage.input_tokens)
+                    .and_then(|tokens| i64::try_from(tokens).ok());
+                let output_tokens = parsed
+                    .usage
+                    .and_then(|usage| usage.output_tokens)
+                    .and_then(|tokens| i64::try_from(tokens).ok());
                 let status = if success { "succeeded" } else { "failed" };
                 let mut reported_status = status.to_string();
                 if let Ok(mut connection) = database.connect()
                     && let Ok(transaction) = connection.transaction()
                 {
-                    let _=transaction.execute("UPDATE agent_runs SET status=CASE WHEN status IN('cancelled','succeeded') THEN status ELSE ?1 END,ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?2",params![status,event_run_id]);
+                    let _=transaction.execute("UPDATE agent_runs SET status=CASE WHEN status IN('cancelled','succeeded') THEN status ELSE ?1 END,reported_input_units=?2,reported_output_units=?3,ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?4",params![status,input_tokens,output_tokens,event_run_id]);
+                    if !success && parsed.auth_required {
+                        let _ = transaction.execute("UPDATE provider_accounts SET status='needs_reauth',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1", [&event_provider_id]);
+                        let _ = timeline::append(
+                            &transaction,
+                            EventRefs {
+                                project_id: &event_project_id,
+                                task_id: Some(&event_task_id),
+                                run_id: Some(&event_run_id),
+                                provider_id: Some(&event_provider_id),
+                            },
+                            "provider.auth_required",
+                            serde_json::json!({}),
+                        );
+                    }
                     reported_status = transaction
                         .query_row(
                             "SELECT status FROM agent_runs WHERE id=?1",
@@ -1053,7 +1082,7 @@ impl RunService {
                             provider_id: Some(&event_provider_id),
                         },
                         "run.status_changed",
-                        serde_json::json!({ "to": reported_status.clone() }),
+                        serde_json::json!({ "to": reported_status.clone(), "reportedUsage": { "inputTokens": input_tokens, "outputTokens": output_tokens } }),
                     );
                     let _ = tasks::rollup_in_transaction(&transaction, &event_task_id);
                     let _ = transaction.commit();
@@ -1149,7 +1178,7 @@ impl RunService {
 
     fn list(&self, task_id: &str) -> Result<Vec<Run>, CommandError> {
         let connection = self.database.connect()?;
-        let mut statement=connection.prepare("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.task_id=?1 ORDER BY r.created_at")?;
+        let mut statement=connection.prepare("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access,r.reported_input_units,r.reported_output_units FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.task_id=?1 ORDER BY r.created_at")?;
         statement
             .query_map([task_id], row_to_run)?
             .collect::<Result<Vec<_>, _>>()
@@ -1157,7 +1186,7 @@ impl RunService {
     }
     fn get(&self, id: &str) -> Result<Option<Run>, CommandError> {
         let connection = self.database.connect()?;
-        connection.query_row("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.id=?1",[id],row_to_run).optional().map_err(Into::into)
+        connection.query_row("SELECT r.id,r.task_id,r.provider_account_id,p.display_name,r.instruction,r.role,r.assignment_title,r.status,r.waiting_reason,w.path,r.raw_log_path,r.context_pack_path,w.environment_manifest_json,r.provider_session_id,r.resume_count,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)),r.updated_at,r.full_access,r.reported_input_units,r.reported_output_units FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.id=?1",[id],row_to_run).optional().map_err(Into::into)
     }
     fn stop(&self, id: &str) -> Result<(), CommandError> {
         let run = self
@@ -1380,6 +1409,12 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
         port,
         updated_at: row.get(16)?,
         full_access: row.get(17)?,
+        reported_input_tokens: row
+            .get::<_, Option<i64>>(18)?
+            .and_then(|tokens| u64::try_from(tokens).ok()),
+        reported_output_tokens: row
+            .get::<_, Option<i64>>(19)?
+            .and_then(|tokens| u64::try_from(tokens).ok()),
     })
 }
 fn default_role() -> String {
@@ -1525,14 +1560,14 @@ mod tests {
         let executable = root.path().join("stand-in");
         fs::write(
             &executable,
-            "#!/bin/sh\nprintf 'argc:%s mode:%s session:%s\\n' \"$#\" \"$1\" \"$2\"\nsleep 0.4\nprintf 'finished\\n'\n",
+            "#!/bin/sh\nprintf 'argc:%s mode:%s session:%s\\n' \"$#\" \"$1\" \"$2\"\nsleep 0.4\nprintf '{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\\nfinished\\n'\n",
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let profile = GenericProfile {
             id: "stand-in".into(),
             display_name: "Stand-in".into(),
-            provider_type: "generic".into(),
+            provider_type: "claude".into(),
             status: "active".into(),
             executable_path: executable.to_string_lossy().into(),
             arguments: vec!["start".into(), "{sessionId}".into(), "{prompt}".into()],
@@ -1661,6 +1696,8 @@ mod tests {
         let states = service.list(&task.id).unwrap();
         assert_eq!(states[0].status, "cancelled");
         assert_eq!(states[1].status, "succeeded");
+        assert_eq!(states[1].reported_input_tokens, Some(12));
+        assert_eq!(states[1].reported_output_tokens, Some(4));
         assert_eq!(
             service.mark_complete(&states[0].id).unwrap().status,
             "succeeded"

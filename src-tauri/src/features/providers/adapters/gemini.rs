@@ -1,4 +1,4 @@
-use super::{ProviderAdapter, ProviderCapabilities};
+use super::{ParsedOutput, ProviderAdapter, ProviderCapabilities, parse_output};
 
 pub struct Gemini;
 pub static GEMINI: Gemini = Gemini;
@@ -37,5 +37,21 @@ impl ProviderAdapter for Gemini {
             reports_usage: false,
             interactive_input: true,
         }
+    }
+    fn parse_output(&self, output: &[u8]) -> ParsedOutput {
+        parse_output(output, &["please set an auth method", "api key not valid"])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_gemini_auth_fixture() {
+        assert!(
+            GEMINI
+                .parse_output(b"Please set an Auth method")
+                .auth_required
+        );
     }
 }

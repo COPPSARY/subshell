@@ -67,13 +67,17 @@ pub struct ResolvedProvider {
     arguments: Vec<String>,
     resume_arguments: Vec<String>,
     prompt_mode: String,
-    secret_environment_key: Option<&'static str>,
-    full_access_flag: Option<&'static str>,
+    adapter: Option<&'static dyn adapters::ProviderAdapter>,
 }
 
 impl ResolvedProvider {
     pub fn secret_environment_key(&self) -> Option<&'static str> {
-        self.secret_environment_key
+        self.adapter.and_then(|adapter| adapter.secret_env_var())
+    }
+
+    pub fn parse_output(&self, output: &[u8]) -> adapters::ParsedOutput {
+        self.adapter
+            .map_or_else(Default::default, |adapter| adapter.parse_output(output))
     }
 
     pub fn new_session_id(&self) -> Option<String> {
@@ -141,12 +145,14 @@ impl ResolvedProvider {
     }
 
     fn full_access_flag(&self) -> Result<&'static str, CommandError> {
-        self.full_access_flag.ok_or_else(|| {
-            CommandError::new(
-                "full_access_unsupported",
-                "This provider profile does not support full permissions",
-            )
-        })
+        self.adapter
+            .map(|adapter| adapter.full_access_flag())
+            .ok_or_else(|| {
+                CommandError::new(
+                    "full_access_unsupported",
+                    "This provider profile does not support full permissions",
+                )
+            })
     }
 }
 
@@ -383,8 +389,7 @@ pub fn resolve(database: &Database, id: &str) -> Result<ResolvedProvider, Comman
         config_root_env_var: profile.config_root_env_var,
         config_source_path: profile.config_source_path,
         inherit_user_home: profile.inherit_user_home,
-        secret_environment_key: adapter.and_then(|adapter| adapter.secret_env_var()),
-        full_access_flag: adapter.map(|adapter| adapter.full_access_flag()),
+        adapter,
     })
 }
 pub(crate) fn list(database: &Database) -> Result<Vec<GenericProfile>, CommandError> {
@@ -595,8 +600,7 @@ mod tests {
             config_root_env_var: None,
             config_source_path: None,
             inherit_user_home: false,
-            secret_environment_key: None,
-            full_access_flag: None,
+            adapter: None,
         };
         let (_, args, _) = resolved
             .launch_command("hello; touch /tmp/nope", dir.path(), None, false)
@@ -638,8 +642,7 @@ mod tests {
             config_root_env_var: None,
             config_source_path: None,
             inherit_user_home: true,
-            secret_environment_key: Some("ANTHROPIC_API_KEY"),
-            full_access_flag: Some("--dangerously-skip-permissions"),
+            adapter: adapters::by_key("claude"),
         };
         let session_id = resolved.new_session_id().unwrap();
         let (_, launch, _) = resolved
@@ -680,8 +683,7 @@ mod tests {
                 config_root_env_var: None,
                 config_source_path: None,
                 inherit_user_home: true,
-                secret_environment_key: adapter.secret_env_var(),
-                full_access_flag: Some(adapter.full_access_flag()),
+                adapter: Some(adapter),
             };
             let (_, launch, _) = resolved
                 .launch_command("work", root.path(), None, true)

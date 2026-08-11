@@ -148,7 +148,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(database.schema_version().unwrap(), 9);
+        assert_eq!(database.schema_version().unwrap(), 10);
     }
 
     #[test]

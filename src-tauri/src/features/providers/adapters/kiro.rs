@@ -1,4 +1,4 @@
-use super::{ProviderAdapter, ProviderCapabilities};
+use super::{ParsedOutput, ProviderAdapter, ProviderCapabilities, parse_output};
 
 pub struct Kiro;
 pub static KIRO: Kiro = Kiro;
@@ -37,5 +37,17 @@ impl ProviderAdapter for Kiro {
             reports_usage: false,
             interactive_input: true,
         }
+    }
+    fn parse_output(&self, output: &[u8]) -> ParsedOutput {
+        parse_output(output, &["not logged in", "authentication required"])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_kiro_auth_fixture() {
+        assert!(KIRO.parse_output(b"Authentication required").auth_required);
     }
 }

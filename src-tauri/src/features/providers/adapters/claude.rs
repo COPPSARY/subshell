@@ -1,4 +1,4 @@
-use super::{ProviderAdapter, ProviderCapabilities};
+use super::{ParsedOutput, ProviderAdapter, ProviderCapabilities, parse_output};
 
 pub struct Claude;
 pub static CLAUDE: Claude = Claude;
@@ -37,5 +37,17 @@ impl ProviderAdapter for Claude {
             reports_usage: false,
             interactive_input: true,
         }
+    }
+    fn parse_output(&self, output: &[u8]) -> ParsedOutput {
+        parse_output(output, &["invalid api key", "please run /login"])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_claude_auth_fixture() {
+        assert!(CLAUDE.parse_output(b"Invalid API key").auth_required);
     }
 }

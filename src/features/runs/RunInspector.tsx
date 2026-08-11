@@ -46,6 +46,7 @@ export function RunInspector({ activeRunId, baseBranch, baseRevision, onComplete
           <div><dt className="text-tertiary">Status</dt><dd className="mt-1 text-primary">{run.status}</dd></div>
           <div><dt className="text-tertiary">Base</dt><dd className="mt-1 flex items-center gap-1.5 font-mono text-[11px] text-secondary"><GitBranch size={12} />{baseBranch} · {baseRevision.slice(0, 8)}</dd></div>
           <div><dt className="text-tertiary">Worktree</dt><dd className="mt-1 break-all font-mono text-[10px] leading-4 text-secondary">{run.worktreePath ?? "Preparing…"}</dd></div>
+          {(run.reportedInputTokens != null || run.reportedOutputTokens != null) && <div><dt className="text-tertiary">Provider-reported usage</dt><dd className="mt-1 font-mono text-[11px] text-secondary">{run.reportedInputTokens ?? "?"} in · {run.reportedOutputTokens ?? "?"} out</dd></div>}
         </dl>
         <div className="mt-5 border-t border-line pt-4"><button className="flex w-full items-center text-left text-xs font-medium text-primary" onClick={() => setView("changes")} type="button"><span className="flex-1">Changed files</span><span className="font-mono text-tertiary">{diff?.files.length ?? 0}</span></button>
           {error ? <p className="mt-2 text-xs text-failed">Could not read changes.</p> : diff?.files.length ? <ul className="mt-2 max-h-48 overflow-auto">{diff.files.map((file) => <li className="truncate py-1 font-mono text-[10px] text-secondary" key={file}>{file}</li>)}</ul> : <p className="mt-2 text-xs text-tertiary">No changes yet.</p>}
