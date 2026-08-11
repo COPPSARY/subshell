@@ -101,7 +101,7 @@ jobs:
           mapfile -d '' assets < <(find release-assets -type f -print0)
           test "${#assets[@]}" -eq 4
           gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo "$GH_REPO" \
             --verify-tag \
             --title "SubShell $GITHUB_REF_NAME" \
             --generate-notes
