@@ -85,7 +85,7 @@ mod tests {
                 .iter()
                 .map(|migration| migration.version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
         );
     }
 
@@ -115,7 +115,7 @@ mod tests {
             connection
                 .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            11
+            12
         );
     }
 
@@ -156,7 +156,7 @@ mod tests {
         let mut broken = embedded().unwrap();
         apply(&mut connection, &broken).unwrap();
         broken.push(Migration {
-            version: 12,
+            version: 13,
             sql: "CREATE TABLE partial (id TEXT); THIS IS NOT SQL;",
         });
 
@@ -165,7 +165,7 @@ mod tests {
             connection
                 .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            11
+            12
         );
         assert_eq!(
             connection
@@ -182,15 +182,15 @@ mod tests {
     #[test]
     fn rejects_a_database_newer_than_the_embedded_schema() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 12).unwrap();
+        connection.pragma_update(None, "user_version", 13).unwrap();
 
         let error = apply(&mut connection, &embedded().unwrap()).unwrap_err();
 
         assert!(matches!(
             error,
             DatabaseError::NewerSchema {
-                found: 12,
-                supported: 11
+                found: 13,
+                supported: 12
             }
         ));
     }
