@@ -1,6 +1,6 @@
 [package]
 name = "subshell"
-version = "0.1.0"
+version = "0.0.1"
 description = "The workspace that coordinates AI coding agents"
 edition = "2024"
 

@@ -668,7 +668,7 @@ impl RunService {
                 .join("worktrees")
                 .join(&task.project_id)
                 .join(&run_id);
-            let config_root = run_dir.join("config");
+            let config_root = provider.runtime_config_root(run_dir.join("config"));
             let log = run_dir.join("output.log");
             let context_path = run_dir.join("context.md");
             fs::create_dir_all(&run_dir).map_err(io_error)?;
@@ -692,7 +692,9 @@ impl RunService {
                 .create_worktree(project_path, &task.base_revision, &worktree)?;
             let mut environment =
                 environment::copy_files(project_path, &worktree, &assignment.environment_files)?;
-            if let Some(source) = provider.config_source_path.as_deref() {
+            if config_root == run_dir.join("config")
+                && let Some(source) = provider.config_source_path.as_deref()
+            {
                 environment::copy_directory(Path::new(source), &config_root)?;
             } else {
                 fs::create_dir_all(&config_root).map_err(io_error)?;
@@ -831,6 +833,8 @@ impl RunService {
             )?;
             tasks::rollup_in_transaction(&transaction, task_id)?;
             transaction.commit()?;
+            let config_root = provider
+                .runtime_config_root(self.paths.data_dir.join("runs").join(&id).join("config"));
             prepared.push(Prepared {
                 run_id: run.id,
                 task_id: run.task_id,
@@ -838,7 +842,7 @@ impl RunService {
                 provider,
                 worktree,
                 log,
-                config_root: self.paths.data_dir.join("runs").join(&id).join("config"),
+                config_root,
                 port,
                 prompt,
                 provider_session_id: run.provider_session_id,
@@ -1719,6 +1723,8 @@ impl RunService {
         )?;
         tasks::rollup_in_transaction(&transaction, &task.id)?;
         transaction.commit()?;
+        let config_root =
+            provider.runtime_config_root(self.paths.data_dir.join("runs").join(id).join("config"));
         let prepared = Prepared {
             run_id: run.id.clone(),
             task_id: run.task_id.clone(),
@@ -1726,7 +1732,7 @@ impl RunService {
             provider,
             worktree,
             log,
-            config_root: self.paths.data_dir.join("runs").join(id).join("config"),
+            config_root,
             port,
             prompt: String::new(),
             provider_session_id: run.provider_session_id,
@@ -1893,6 +1899,8 @@ fn base_environment(home: &Path, port: u16, inherit_user_home: bool) -> Vec<(Str
         "SYSTEMROOT",
         "WINDIR",
         "PATHEXT",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
     ] {
         if let Ok(value) = std::env::var(key) {
             values.push((key.into(), value));
@@ -1910,8 +1918,6 @@ fn base_environment(home: &Path, port: u16, inherit_user_home: bool) -> Vec<(Str
             "SHELL",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
-            "XDG_RUNTIME_DIR",
-            "DBUS_SESSION_BUS_ADDRESS",
             "APPDATA",
             "LOCALAPPDATA",
             "USERPROFILE",
@@ -2426,19 +2432,21 @@ mod tests {
             .unwrap();
         assert_eq!(approved.status, "launched");
         let automatic_runs = service.list(&automatic_task.id).unwrap();
-        assert_eq!(automatic_runs.len(), 3);
+        assert_eq!(automatic_runs.len(), 4);
         assert!(automatic_runs.iter().all(|run| !run.full_access));
         assert_eq!(
             automatic_runs
                 .iter()
                 .filter(|run| run.role != "planner")
                 .count(),
-            2
+            3
         );
-        assert_ne!(
-            automatic_runs[1].worktree_path,
-            automatic_runs[2].worktree_path
-        );
+        let worktrees = automatic_runs
+            .iter()
+            .filter(|run| run.role != "planner")
+            .filter_map(|run| run.worktree_path.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(worktrees.len(), 3);
         let frontend = automatic_runs
             .iter()
             .find(|run| run.title.as_deref() == Some("Frontend"))
@@ -2452,6 +2460,21 @@ mod tests {
         assert_eq!(
             tests.waiting_reason.as_deref(),
             Some("Waiting for prerequisite agent")
+        );
+        let reviewer = automatic_runs
+            .iter()
+            .find(|run| run.role == "reviewer")
+            .unwrap();
+        assert_eq!(reviewer.status, "queued");
+        assert_eq!(
+            reviewer
+                .depends_on_run_ids
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            [frontend.id.clone(), tests.id.clone()]
+                .into_iter()
+                .collect()
         );
         for _ in 0..50 {
             if service

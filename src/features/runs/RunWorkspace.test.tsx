@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { listContextSources, previewContext } from "../context";
 import { createProvider, detectProviders, listProviders } from "../providers";
 import { listAgentTemplates, listEnvironmentProfiles } from "../workspace";
-import { approveTaskPlan, completeRun, getTaskPlan, listRuns, readRunDiff, rejectTaskPlan, resumeRun, startRuns } from "./api";
+import { approveTaskPlan, completeRun, getTaskPlan, listRuns, previewRunEnvironment, readRunDiff, rejectTaskPlan, resumeRun, startRuns } from "./api";
 import { RunWorkspace } from "./RunWorkspace";
 
 vi.mock("../context", () => ({ listContextSources: vi.fn(), previewContext: vi.fn() }));
@@ -19,6 +19,7 @@ const terminalView = vi.hoisted(() => ({ received: 0, renders: 0 }));
 vi.mock("./RunTerminal", () => ({ RunTerminal: ({ runId, subscribe }: { runId: string; subscribe: (id: string, listener: () => void) => () => void }) => { terminalView.renders += 1; subscribe(runId, () => { terminalView.received += 1; }); return <div>Terminal</div>; } }));
 
 beforeEach(() => {
+  vi.clearAllMocks();
   terminalView.received = 0; terminalView.renders = 0;
   vi.mocked(listProviders).mockResolvedValue([{ id: "p1", displayName: "Stand-in", executablePath: "/tmp/agent", arguments: ["{prompt}"], promptMode: "argument", configRootEnvVar: null, configSourcePath: null, inheritUserHome: false }]);
   vi.mocked(listContextSources).mockResolvedValue(["README.md"]);
@@ -28,6 +29,7 @@ beforeEach(() => {
   vi.mocked(listEnvironmentProfiles).mockResolvedValue([]);
   vi.mocked(readRunDiff).mockResolvedValue({ files: ["src/app.ts"], patch: "+changed", truncated: false });
   vi.mocked(previewContext).mockResolvedValue({ token: "draft", content: "focused context", sha256: "abc", manifest: { entries: [{ source: "task", bytes: 15, included: true, reason: null }], totalBytes: 15, budgetBytes: 65536, reportedTokens: null, wasEdited: false, sha256: "abc" } });
+  vi.mocked(previewRunEnvironment).mockResolvedValue({ files: [], port: null });
 });
 
 it("surfaces a planner proposal and starts its approved assignments", async () => {
@@ -65,6 +67,12 @@ it("applies a reusable agent template to a new assignment", async () => {
   expect((screen.getByLabelText("Agent role") as HTMLSelectElement).value).toBe("reviewer");
   expect(screen.queryByLabelText("Usage limit")).toBeNull();
   expect((screen.getByLabelText("Assignment instruction") as HTMLTextAreaElement).value).toBe("Review the implementation");
+  fireEvent.click(screen.getByRole("button", { name: "Preview files" }));
+  await screen.findByText("No files will be copied");
+  fireEvent.click(screen.getByRole("button", { name: "Preview context" }));
+  await screen.findByDisplayValue("focused context");
+  fireEvent.click(await screen.findByRole("button", { name: "Run 1 agent" }));
+  await waitFor(() => expect(startRuns).toHaveBeenCalledWith("task", [expect.objectContaining({ unitLimit: 80 })], expect.any(Function)));
 });
 
 it("turns a quick goal into a context-backed run automatically", async () => {
@@ -104,10 +112,10 @@ it("turns a quick goal into a context-backed run automatically", async () => {
 it("automatically uses an installed CLI for the first prompt", async () => {
   vi.mocked(listProviders).mockResolvedValue([]);
   vi.mocked(detectProviders).mockResolvedValue([{ key: "codex", displayName: "Codex", executablePath: "/usr/bin/codex", arguments: ["{prompt}"], resumeArguments: ["resume", "--last"], promptMode: "argument", configRootEnvVar: "CODEX_HOME", authProbeArguments: ["login", "status"], capabilities: { nativeSkills: false, reportsUsage: false, interactiveInput: true }, isConfigured: false }]);
-  vi.mocked(createProvider).mockResolvedValue({ id: "p2", displayName: "Codex", executablePath: "/usr/bin/codex", arguments: ["{prompt}"], promptMode: "argument", configRootEnvVar: "CODEX_HOME", configSourcePath: null, inheritUserHome: false });
+  vi.mocked(createProvider).mockResolvedValue({ id: "p2", displayName: "Codex", executablePath: "/usr/bin/codex", arguments: ["{prompt}"], promptMode: "argument", configRootEnvVar: "CODEX_HOME", configSourcePath: null, inheritUserHome: true });
   vi.mocked(startRuns).mockResolvedValue([]);
   render(<RunWorkspace autoStart project={{ id: "project", name: "Repo", path: "/tmp/repo", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }} task={{ id: "task", projectId: "project", title: "Fix", description: "Fix it", status: "task", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" }} />);
-  await waitFor(() => expect(createProvider).toHaveBeenCalledWith(expect.objectContaining({ executablePath: "/usr/bin/codex", providerType: "codex", configRootEnvVar: "CODEX_HOME", inheritUserHome: false })));
+  await waitFor(() => expect(createProvider).toHaveBeenCalledWith(expect.objectContaining({ executablePath: "/usr/bin/codex", providerType: "codex", configRootEnvVar: "CODEX_HOME", inheritUserHome: true })));
   await waitFor(() => expect(startRuns).toHaveBeenCalledWith("task", [expect.objectContaining({ providerId: "p2" })], expect.any(Function)));
 });
 

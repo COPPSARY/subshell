@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Bookmark as BookmarkIcon, Boxes, GitMerge, HardDrive, Play, Plus, RotateCcw, Search, Settings2, Trash2 } from "lucide-react";
 import type { Project } from "../projects";
 import { listProviders, type GenericProfile } from "../providers";
+import { stopRun } from "../runs";
 import type { Task } from "../tasks";
 import { createSnapshot, getDashboard, listAgentTemplates, listBookmarks, listEnvironmentProfiles, listExplorerAgents, listMergeQueue, listSnapshots, processMergeQueue, removeAgentTemplate, removeEnvironmentProfile, rollbackSnapshot, saveAgentTemplate, saveEnvironmentProfile, searchWorkspace, toggleBookmark } from "./api";
 import type { AgentTemplate, Bookmark, Dashboard, EnvironmentProfile, ExplorerAgent, MergeQueueItem, WorkspaceSearchResult, WorkspaceSnapshot } from "./model";
@@ -66,7 +67,7 @@ export function WorkspaceView({ project, tasks, onOpen, onOpenResult }: Props) {
             <div className="flex items-center gap-2"><button className="min-w-0 flex-1 text-left" onClick={() => onOpen(task, run.id)} type="button"><strong className="block truncate text-xs">{run.title || run.role || "Agent"}</strong><span className="mt-0.5 block text-[10px] text-tertiary">{run.providerName} · {run.role}</span></button><span className="status-pill">{run.status}</span></div>
             <dl className="mt-3 grid grid-cols-3 gap-2 font-mono text-[10px] text-tertiary"><div><dt>Process</dt><dd className="mt-0.5 text-secondary">{usage?.processId ?? "—"}</dd></div><div><dt>CPU / memory</dt><dd className="mt-0.5 text-secondary">{usage?.cpuPercent != null ? `${usage.cpuPercent.toFixed(1)}%` : "—"} · {formatBytes(usage?.residentBytes)}</dd></div><div><dt>Preview port</dt><dd className="mt-0.5 text-secondary">{run.port ?? "—"}</dd></div></dl>
             <p className="mt-3 truncate font-mono text-[9px] text-tertiary" title={run.worktreePath ?? undefined}>{run.worktreePath ?? "Preparing isolated worktree…"}</p>
-            {usage?.active && run.canResume && <button className="button-secondary mt-3" disabled={busy} onClick={() => act(() => createSnapshot(run.id, "checkpoint", `Checkpoint · ${run.title || run.role}`))} type="button">Checkpoint and pause agent</button>}
+            {usage?.active && run.canResume && <button className="button-secondary mt-3" disabled={busy} onClick={() => act(async () => { await createSnapshot(run.id, "checkpoint", `Checkpoint · ${run.title || run.role}`); await stopRun(run.id); })} type="button">Checkpoint and pause agent</button>}
           </li>)}</ul> : <p className="mt-2 text-xs text-tertiary">No agents assigned yet.</p>}
         </article>)}</div> : <p className="empty-row">No task groups yet.</p>}
       </section>

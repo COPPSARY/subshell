@@ -22,7 +22,37 @@ It is more than a terminal multiplexer: SubShell isolates each run, packages foc
 Plan → Assign → Run → Observe → Review → Merge
 ```
 
-## Getting Started
+## Install
+
+Download the newest packages from [GitHub Releases](https://github.com/COPPSARY/subshell/releases/latest). The first release supports Linux x86_64 and Windows x64.
+
+### Linux
+
+Install the latest AppImage for your user:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/COPPSARY/subshell/main/install.sh | sh
+```
+
+This installs `subshell` in `~/.local/bin` by default. Set `SUBSHELL_INSTALL_DIR` to choose another directory. The release also includes a `.deb` package for manual installation:
+
+```sh
+sudo apt install ./SubShell_*_amd64.deb
+```
+
+### Windows
+
+Run PowerShell and download and launch the latest `.exe` installer:
+
+```powershell
+irm https://raw.githubusercontent.com/COPPSARY/subshell/main/install.ps1 | iex
+```
+
+An `.msi` installer is also available on the latest release page. The first unsigned release may display a Windows SmartScreen warning; verify that the download came from `github.com/COPPSARY/subshell` before continuing.
+
+Both terminal installers resolve GitHub's latest release when they run; they do not pin `v0.0.1`. Unsupported operating systems and processor architectures stop with an explanatory error.
+
+## Development Setup
 
 Install Node.js 20+, Rust, and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/), then run:
 

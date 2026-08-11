@@ -87,6 +87,7 @@ pub struct WorkspaceRun {
     pub title: Option<String>,
     pub instruction: String,
     pub status: String,
+    pub worktree_path: Option<String>,
     pub updated_at: String,
 }
 
@@ -168,7 +169,7 @@ pub fn snapshot(database: &Database, run_id: &str) -> Result<WorkspaceSnapshot, 
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
     let connection = database.connect()?;
     let runs = {
-        let mut statement = connection.prepare("SELECT r.id,p.display_name,r.role,r.assignment_title,r.instruction,r.status,r.updated_at FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id WHERE r.task_id=?1 ORDER BY r.created_at")?;
+        let mut statement = connection.prepare("SELECT r.id,p.display_name,r.role,r.assignment_title,r.instruction,r.status,w.path,r.updated_at FROM agent_runs r JOIN provider_accounts p ON p.id=r.provider_account_id LEFT JOIN worktrees w ON w.agent_run_id=r.id WHERE r.task_id=?1 ORDER BY r.created_at")?;
         statement
             .query_map([&task_id], |row| {
                 Ok(WorkspaceRun {
@@ -178,7 +179,8 @@ pub fn snapshot(database: &Database, run_id: &str) -> Result<WorkspaceSnapshot, 
                     title: row.get(3)?,
                     instruction: row.get(4)?,
                     status: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    worktree_path: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -318,8 +320,46 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
             "A plan needs between 1 and 8 independent assignments",
         ));
     }
+    let mut assignments = input.assignments.clone();
+    let review_dependencies = assignments
+        .iter()
+        .filter(|assignment| assignment.role != "reviewer")
+        .map(|assignment| assignment.title.trim().to_string())
+        .collect::<Vec<_>>();
+    if !assignments
+        .iter()
+        .any(|assignment| assignment.role == "reviewer")
+    {
+        if assignments.len() == 8 {
+            return Err(CommandError::new(
+                "reviewer_required",
+                "Plans with eight assignments must reserve one assignment for final review",
+            ));
+        }
+        assignments.push(PlanAssignment {
+            title: "Final review".into(),
+            instruction: "Review every completed sibling Run. Use workspace_snapshot to locate their worktrees, inspect their exact changes, run the relevant checks, and report concrete findings without modifying files.".into(),
+            role: "reviewer".into(),
+            allowed_paths: Vec::new(),
+            depends_on: review_dependencies.clone(),
+        });
+    }
+    for assignment in assignments
+        .iter_mut()
+        .filter(|assignment| assignment.role == "reviewer")
+    {
+        for dependency in &review_dependencies {
+            if !assignment
+                .depends_on
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(dependency))
+            {
+                assignment.depends_on.push(dependency.clone());
+            }
+        }
+    }
     let mut titles = std::collections::HashSet::new();
-    for assignment in &input.assignments {
+    for assignment in &assignments {
         let title = assignment.title.trim();
         let instruction = assignment.instruction.trim();
         if title.is_empty()
@@ -364,7 +404,7 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
             ));
         }
     }
-    validate_dependencies(&input.assignments)?;
+    validate_dependencies(&assignments)?;
     let mut connection = database.connect()?;
     let (task_id, project_id, role, status): (String, String, String, String) = connection
         .query_row(
@@ -407,7 +447,7 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
         "INSERT INTO task_plans(id,task_id,planner_run_id,attempt_number,summary,created_at) VALUES(?1,?2,?3,?4,?5,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
         params![plan_id, task_id, input.run_id, attempt, input.summary.trim()],
     )?;
-    for (position, assignment) in input.assignments.iter().enumerate() {
+    for (position, assignment) in assignments.iter().enumerate() {
         transaction.execute(
             "INSERT INTO task_plan_assignments(id,plan_id,title,instruction,role,allowed_paths_json,depends_on_json,position) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![Uuid::new_v4().to_string(), plan_id, assignment.title.trim(), assignment.instruction.trim(), assignment.role, serde_json::to_string(&assignment.allowed_paths).unwrap(), serde_json::to_string(&assignment.depends_on).unwrap(), position as i64],
@@ -440,7 +480,7 @@ pub fn submit_plan(database: &Database, input: SubmitPlanInput) -> Result<String
             provider_id: None,
         },
         "plan.submitted",
-        serde_json::json!({"planId": plan_id, "assignmentCount": input.assignments.len(), "summary": input.summary.trim(), "taskTitle": task_title}),
+        serde_json::json!({"planId": plan_id, "assignmentCount": assignments.len(), "summary": input.summary.trim(), "taskTitle": task_title}),
     )?;
     transaction.commit()?;
     Ok(plan_id)
@@ -753,13 +793,13 @@ fn run_mcp(database: &Database, run_id: &str) -> Result<(), String> {
             .unwrap_or_default();
         let result = match method {
             "initialize" => {
-                serde_json::json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"subshell","version":"0.1.0"}})
+                serde_json::json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"subshell","version":env!("CARGO_PKG_VERSION")}})
             }
             "tools/list" => serde_json::json!({"tools":[
                 {"name":"workspace_snapshot","description":"Read this Run's Task, sibling Runs, and attention state","inputSchema":{"type":"object","properties":{}}},
                 {"name":"request_action","description":"Request a visible human-approved application command and wait for its result","inputSchema":{"type":"object","required":["action","arguments"],"properties":{"action":{"type":"string"},"arguments":{"type":"object"}}}},
                 {"name":"report_activity","description":"Publish explicitly agent-authored progress without changing lifecycle state","inputSchema":{"type":"object","required":["kind","detail"],"properties":{"kind":{"enum":["progress","validation","changed_path"]},"detail":{"type":"string"}}}}
-                ,{"name":"submit_plan","description":"Planner only: name the Task and submit 1-8 independent, non-recursive assignments for SubShell to launch","inputSchema":{"type":"object","required":["assignments"],"properties":{"taskTitle":{"type":"string","maxLength":72},"summary":{"type":"string"},"assignments":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"object","required":["title","instruction"],"properties":{"title":{"type":"string"},"instruction":{"type":"string"},"role":{"enum":["executor","research","test","reviewer"]},"allowedPaths":{"type":"array","items":{"type":"string"}}}}}}}}
+                ,{"name":"submit_plan","description":"Planner only: name the Task and submit 1-8 bounded assignments; SubShell schedules dependencies and final review","inputSchema":{"type":"object","required":["assignments"],"properties":{"taskTitle":{"type":"string","maxLength":72},"summary":{"type":"string"},"assignments":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"object","required":["title","instruction"],"properties":{"title":{"type":"string"},"instruction":{"type":"string"},"role":{"enum":["executor","implementer","research","test","tester","reviewer","debugger"]},"allowedPaths":{"type":"array","items":{"type":"string"}},"dependsOn":{"type":"array","items":{"type":"string"}}}}}}}}
             ]}),
             "tools/call" => {
                 let params = request.get("params").cloned().unwrap_or(Value::Null);
@@ -936,11 +976,24 @@ mod tests {
                 .unwrap()
                 .query_row::<i64, _, _>(
                     "SELECT COUNT(*) FROM task_plan_assignments WHERE plan_id=?1",
-                    [plan_id],
+                    [&plan_id],
                     |row| row.get(0)
                 )
                 .unwrap(),
-            2
+            3
+        );
+        let reviewer_dependencies: String = database
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT depends_on_json FROM task_plan_assignments WHERE plan_id=?1 AND role='reviewer'",
+                [&plan_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&reviewer_dependencies).unwrap(),
+            ["UI", "API"]
         );
         let (title, description): (String, String) = database
             .connect()

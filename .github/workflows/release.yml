@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Existing CI gates
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Verify release version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Match tag and application versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const expected = process.env.RELEASE_TAG.match(/^v(\d+\.\d+\.\d+)$/)?.[1];
+          if (!expected) throw new Error(`Release tag must be vMAJOR.MINOR.PATCH, got ${process.env.RELEASE_TAG}`);
+          const npmVersion = require("./package.json").version;
+          const tauriVersion = require("./src-tauri/tauri.conf.json").version;
+          const cargoVersion = fs.readFileSync("src-tauri/Cargo.toml", "utf8").match(/^version = "([^"]+)"/m)?.[1];
+          for (const [source, version] of Object.entries({ package: npmVersion, tauri: tauriVersion, cargo: cargoVersion })) {
+            if (version !== expected) throw new Error(`${source} version ${version} does not match tag ${process.env.RELEASE_TAG}`);
+          }
+          NODE
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [quality, version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            platform: ubuntu-22.04
+            bundles: appimage,deb
+            artifact: bundles-linux-x86_64
+            paths: |
+              src-tauri/target/release/bundle/appimage/*.AppImage
+              src-tauri/target/release/bundle/deb/*.deb
+          - name: Windows x64
+            platform: windows-latest
+            bundles: nsis,msi
+            artifact: bundles-windows-x64
+            paths: |
+              src-tauri/target/release/bundle/nsis/*-setup.exe
+              src-tauri/target/release/bundle/msi/*.msi
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build installers
+        uses: tauri-apps/tauri-action@v1
+        with:
+          args: --bundles ${{ matrix.bundles }} --ci
+      - name: Stage installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.paths }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bundles-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish release after every bundle succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -d '' assets < <(find release-assets -type f -print0)
+          test "${#assets[@]}" -eq 4
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag \
+            --title "SubShell $GITHUB_REF_NAME" \
+            --generate-notes

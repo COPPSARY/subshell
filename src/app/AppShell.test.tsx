@@ -26,7 +26,7 @@ describe("AppShell", () => {
       ["Activity", "No activity yet"],
       ["Tasks", "No tasks yet"],
       ["Agents", "Agents"],
-      ["Providers", "AI agents"],
+      ["Providers", "Provider accounts"],
     ];
 
     for (const [button, heading] of destinations) {
