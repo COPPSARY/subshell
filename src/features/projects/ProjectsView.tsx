@@ -91,5 +91,9 @@ export function ProjectsView({ selectedProject, onSelect, onStartGoal }: Props) 
   </div>;
 }
 
-function message(error: unknown) { if (typeof error === "string") return error; if (error && typeof error === "object" && "message" in error) return String(error.message); return "The project folder could not be read."; }
+function message(error: unknown) {
+  const detail = typeof error === "string" ? error : error && typeof error === "object" && "message" in error ? String(error.message) : "";
+  if (detail.includes("reading 'invoke'")) return "SubShell's desktop backend is unavailable. Restart the desktop app, then try again.";
+  return detail || "The project folder could not be read. Check that the folder still exists, then try again.";
+}
 function sameStatus(left: Project["git"], right: Project["git"]) { return left.isRepository === right.isRepository && left.branch === right.branch && left.revision === right.revision && left.dirty === right.dirty; }

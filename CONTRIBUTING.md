@@ -40,6 +40,10 @@ an end-to-end example, and add app wiring only after the feature works.
 
 Run frontend tests/build and Rust test/fmt/clippy commands documented in the README. Automated tests must use temporary Git repositories and fake provider executables—never real accounts or a contributor's working directory.
 
+Before integration, also verify the full coordination fixture (context sharing, approval decisions, conflict evidence, merge cleanup, and database reopen) through `cargo test --manifest-path src-tauri/Cargo.toml`, and build a host package with `npm run build:bundle`. CI repeats these checks from a clean checkout. UI changes need a keyboard-only pass at the minimum 900×600 window, a reduced-motion pass, and a screenshot in the pull request.
+
+Do not put credentials in fixtures, environment snapshots, logs, screenshots, or issue text. Provider secrets belong only in the OS keychain; test credential paths use the in-memory secret store.
+
 ## Pull Requests
 
 Use imperative commits such as `feat(timeline): add provider filter`. A PR should describe the user impact, owned paths, contracts changed, migration, tests run, screenshots for UI work, limitations, and rollback approach. Link the issue it addresses. Review feedback should stay within the PR's coherent scope.

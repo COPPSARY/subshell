@@ -46,3 +46,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run build
+      - run: npm run build:bundle -- --bundles deb

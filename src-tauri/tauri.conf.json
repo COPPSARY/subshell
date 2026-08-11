@@ -29,6 +29,9 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "category": "DeveloperTool",
+    "shortDescription": "Coordinate AI coding agents",
+    "longDescription": "A local desktop workspace for planning, running, reviewing, and integrating isolated AI coding agent work."
   }
 }
