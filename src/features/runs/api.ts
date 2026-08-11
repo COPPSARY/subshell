@@ -26,3 +26,4 @@ export const stopRun = (runId: string) => invoke<void>("runs_stop", { input: { r
 export const completeRun = (runId: string) => invoke<Run>("runs_mark_complete", { input: { runId } });
 export const readRunDiff = (runId: string) => invoke<RunDiff>("runs_diff", { input: { runId } });
 export const previewRunEnvironment = (projectId: string, files: string[]) => invoke<{ files: string[]; port: null }>("runs_environment_preview", { input: { projectId, files } });
+export const decideQuit = (decision: "preserve" | "stop" | "cancel") => invoke<void>("runs_decide_quit", { input: { decision } });

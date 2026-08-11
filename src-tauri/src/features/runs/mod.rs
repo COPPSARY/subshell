@@ -132,6 +132,12 @@ pub struct EnvironmentInput {
     pub files: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuitInput {
+    pub decision: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
@@ -312,6 +318,28 @@ pub fn runs_resume(
 #[tauri::command]
 pub fn runs_diff(input: RunId, service: State<RunService>) -> Result<GitDiff, CommandError> {
     service.diff(&input.run_id)
+}
+
+#[tauri::command]
+pub fn runs_decide_quit(
+    input: QuitInput,
+    service: State<RunService>,
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), CommandError> {
+    match input.decision.as_str() {
+        "preserve" => window.minimize().map_err(tauri_error),
+        "stop" => {
+            service.stop_active()?;
+            app.exit(0);
+            Ok(())
+        }
+        "cancel" => Ok(()),
+        _ => Err(CommandError::new(
+            "invalid_quit_decision",
+            "Quit decision must be preserve, stop, or cancel",
+        )),
+    }
 }
 
 struct Prepared {
@@ -912,7 +940,7 @@ impl RunService {
         let mut connection = self.database.connect()?;
         let active = {
             let mut statement = connection.prepare(
-                "SELECT r.id,r.task_id,t.project_id,r.provider_account_id FROM agent_runs r JOIN tasks t ON t.id=r.task_id WHERE r.status IN('preparing','running','waiting')",
+                "SELECT r.id,r.task_id,t.project_id,r.provider_account_id,r.process_identity,(json_array_length(g.resume_arguments_json)>0 AND (instr(g.resume_arguments_json,'{sessionId}')=0 OR r.provider_session_id IS NOT NULL)) FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN generic_provider_profiles g ON g.provider_account_id=r.provider_account_id WHERE r.status IN('preparing','running','waiting')",
             )?;
             statement
                 .query_map([], |row| {
@@ -921,14 +949,19 @@ impl RunService {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, bool>(5)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
         };
         let transaction = connection.transaction()?;
-        for (run_id, task_id, project_id, provider_id) in active {
+        for (run_id, task_id, project_id, provider_id, process_identity, recoverable) in active {
+            if self.processes.is_active(&run_id) {
+                continue;
+            }
             transaction.execute(
-                "UPDATE agent_runs SET status='failed',ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+                "UPDATE agent_runs SET status='failed',process_identity=NULL,waiting_reason='Process lost; resume this session or start a new one',ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
                 [&run_id],
             )?;
             timeline::append(
@@ -939,8 +972,8 @@ impl RunService {
                     run_id: Some(&run_id),
                     provider_id: Some(&provider_id),
                 },
-                "run.status_changed",
-                serde_json::json!({ "to": "failed", "reason": "application_restarted" }),
+                "run.process_lost",
+                serde_json::json!({ "to": "failed", "processIdentity": process_identity, "recoverable": recoverable }),
             )?;
             tasks::rollup_in_transaction(&transaction, &task_id)?;
         }
@@ -958,6 +991,31 @@ impl RunService {
         drop(connection);
         for project_id in projects {
             self.dispatch_next(&project_id, Channel::new(|_| Ok(())))?;
+        }
+        Ok(())
+    }
+
+    pub fn active_count(&self) -> Result<u32, CommandError> {
+        Ok(self.database.connect()?.query_row(
+            "SELECT COUNT(*) FROM agent_runs WHERE status IN('queued','preparing','running','waiting')",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn stop_active(&self) -> Result<(), CommandError> {
+        let connection = self.database.connect()?;
+        let ids = {
+            let mut statement = connection.prepare(
+                "SELECT id FROM agent_runs WHERE status IN('queued','preparing','running','waiting')",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        drop(connection);
+        for id in ids {
+            self.stop(&id)?;
         }
         Ok(())
     }
@@ -1220,7 +1278,10 @@ impl RunService {
         tasks::rollup_in_transaction(&transaction, &task.id)?;
         transaction.commit()?;
         if matches!(run.status.as_str(), "preparing" | "running" | "waiting") {
-            self.processes.stop(id)
+            match self.processes.stop(id) {
+                Err(error) if error.code == "run_not_active" => Ok(()),
+                result => result,
+            }
         } else {
             Ok(())
         }
@@ -1420,6 +1481,9 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
 fn default_role() -> String {
     "executor".into()
 }
+fn tauri_error(error: tauri::Error) -> CommandError {
+    CommandError::new("window_error", error.to_string())
+}
 fn base_environment(home: &Path, port: u16, inherit_user_home: bool) -> Vec<(String, String)> {
     let mut values = Vec::new();
     for key in [
@@ -1489,6 +1553,78 @@ mod tests {
     };
     use std::{os::unix::fs::PermissionsExt, process::Command, thread, time::Duration};
     use tempfile::tempdir;
+
+    #[test]
+    fn startup_reconciles_a_lost_process_without_discarding_resume_state() {
+        let root = tempdir().unwrap();
+        let paths = RuntimePaths {
+            data_dir: root.path().join("data"),
+        };
+        let database = Database::initialize(&paths.data_dir.join("db.sqlite3")).unwrap();
+        let profile = GenericProfile {
+            id: "claude-account".into(),
+            display_name: "Claude fixture".into(),
+            provider_type: "claude".into(),
+            status: "active".into(),
+            executable_path: std::env::current_exe().unwrap().to_string_lossy().into(),
+            arguments: vec![
+                "--session-id".into(),
+                "{sessionId}".into(),
+                "{prompt}".into(),
+            ],
+            resume_arguments: vec!["--resume".into(), "{sessionId}".into()],
+            prompt_mode: "argument".into(),
+            config_root_env_var: Some("CLAUDE_CONFIG_DIR".into()),
+            config_source_path: None,
+            inherit_user_home: false,
+        };
+        providers::save(&profile, &database, &paths).unwrap();
+        let worktree = root.path().join("worktree");
+        let log = root.path().join("output.log");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(&log, "before restart\n").unwrap();
+        let connection = database.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/project','now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Task','working','main','abc','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,raw_log_path,process_identity,provider_session_id,created_at,updated_at) VALUES('run','task','claude-account','work','running',?1,'4242','session-1','now','now')", [log.to_string_lossy()]).unwrap();
+        connection.execute("INSERT INTO worktrees(id,agent_run_id,path,base_branch,base_revision,state,created_at) VALUES('worktree','run',?1,'main','abc','active','now')", [worktree.to_string_lossy()]).unwrap();
+        drop(connection);
+
+        let service = RunService::new(
+            database.clone(),
+            paths,
+            GitService::default(),
+            ContextDrafts::default(),
+            ProcessSupervisor::default(),
+            PortLeases::default(),
+            Arc::new(crate::platform::keychain::MemorySecretStore::default()),
+        );
+        service.recover_and_dispatch().unwrap();
+
+        let run = service.get("run").unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.can_resume);
+        assert_eq!(run.worktree_path.as_deref(), worktree.to_str());
+        assert_eq!(run.raw_log_path.as_deref(), log.to_str());
+        assert!(
+            run.waiting_reason
+                .as_deref()
+                .unwrap()
+                .contains("Process lost")
+        );
+        let connection = database.connect().unwrap();
+        assert_eq!(
+            connection
+                .query_row::<Option<String>, _, _>(
+                    "SELECT process_identity FROM agent_runs WHERE id='run'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(connection.query_row::<String, _, _>("SELECT event_type FROM timeline_events WHERE agent_run_id='run' ORDER BY sequence DESC LIMIT 1", [], |row| row.get(0)).unwrap(), "run.process_lost");
+    }
 
     #[test]
     fn interactive_runs_always_receive_a_terminal_type() {

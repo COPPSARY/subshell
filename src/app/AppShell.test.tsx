@@ -1,9 +1,11 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getHealth } from "../features/health";
 import { AppShell } from "./AppShell";
 
 vi.mock("../features/health", () => ({ getHealth: vi.fn() }));
+const eventMocks = vi.hoisted(() => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => eventMocks);
 
 const mockedHealth = vi.mocked(getHealth);
 
@@ -11,6 +13,8 @@ describe("AppShell", () => {
   beforeEach(() => {
     mockedHealth.mockReset();
     mockedHealth.mockResolvedValue({ status: "ok", schemaVersion: 4 });
+    eventMocks.listen.mockReset();
+    eventMocks.listen.mockResolvedValue(() => undefined);
   });
 
   it("navigates all independently owned feature views", async () => {
@@ -46,5 +50,14 @@ describe("AppShell", () => {
     render(<AppShell />);
     expect((await screen.findByRole("status")).textContent).toContain("Backend unavailable");
     expect(screen.getByRole("button", { name: "Tasks" })).toBeTruthy();
+  });
+
+  it("asks for a safe decision instead of closing over active runs", async () => {
+    render(<AppShell />);
+    await waitFor(() => expect(eventMocks.listen).toHaveBeenCalled());
+    act(() => eventMocks.listen.mock.calls[0][1]({ payload: 2 }));
+    expect(screen.getByRole("dialog", { name: "Agents are still running" }).textContent).toContain("2 active runs");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

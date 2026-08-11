@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::{
     features::{
@@ -109,6 +109,7 @@ pub fn run() {
             runs::runs_mark_complete,
             runs::runs_resume,
             runs::runs_diff,
+            runs::runs_decide_quit,
             timeline::timeline_list,
             attention::attention_list,
             attention::attention_acknowledge,
@@ -120,6 +121,16 @@ pub fn run() {
             agent_api::workspace_decide_action,
             agent_api::workspace_list_approvals,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && let Some(service) = window.app_handle().try_state::<RunService>()
+                && let Ok(active_runs) = service.active_count()
+                && active_runs > 0
+            {
+                api.prevent_close();
+                let _ = window.emit("runs-quit-requested", active_runs);
+            }
+        })
         .run(tauri::generate_context!())
         .expect("failed to run SubShell");
 }

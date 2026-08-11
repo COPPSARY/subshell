@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { approveTaskPlan, completeRun, enqueueRuns, getTaskPlan, readRunDiff, readRunOutputTail, resumeRun, startRuns, writeRunInput } from "./api";
+import { approveTaskPlan, completeRun, decideQuit, enqueueRuns, getTaskPlan, readRunDiff, readRunOutputTail, resumeRun, startRuns, writeRunInput } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -59,4 +59,10 @@ it("loads and approves a submitted task plan through explicit contracts", async 
   await approveTaskPlan("plan-1", true, vi.fn());
   expect(invoke).toHaveBeenNthCalledWith(1, "runs_plan_get", { input: { taskId: "task-1" } });
   expect(invoke).toHaveBeenNthCalledWith(2, "runs_plan_approve", expect.objectContaining({ input: { planId: "plan-1", fullAccess: true }, onEvent: expect.anything() }));
+});
+
+it("sends an explicit safe quit decision", async () => {
+  vi.mocked(invoke).mockResolvedValueOnce(undefined);
+  await decideQuit("preserve");
+  expect(invoke).toHaveBeenCalledWith("runs_decide_quit", { input: { decision: "preserve" } });
 });

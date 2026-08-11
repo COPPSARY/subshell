@@ -44,6 +44,13 @@ pub struct ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    pub fn is_active(&self, run_id: &str) -> bool {
+        self.handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(run_id)
+    }
+
     pub fn launch(
         &self,
         run_id: String,

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import appIconUrl from "../../assets/app-icon.svg";
 import { getHealth } from "../features/health";
 import { ProjectsView, restoreProject, type Project } from "../features/projects";
 import { ProvidersView } from "../features/providers";
-import { AgentsView } from "../features/runs";
+import { AgentsView, decideQuit } from "../features/runs";
 import { createTask, getTask, listTasks, TasksView, type Task } from "../features/tasks";
 import { TimelineView } from "../features/timeline";
 import { destinations, type DestinationName } from "./navigation";
@@ -17,6 +18,7 @@ export function AppShell() {
   const [autoStartTaskId, setAutoStartTaskId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [quitActiveRuns, setQuitActiveRuns] = useState<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -29,6 +31,14 @@ export function AppShell() {
   }, []);
 
   useEffect(() => { restoreProject().then(setProject).catch(() => undefined); }, []);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: () => void = () => undefined;
+    listen<number>("runs-quit-requested", (event) => setQuitActiveRuns(event.payload))
+      .then((next) => { if (disposed) next(); else unlisten = next; })
+      .catch(() => undefined);
+    return () => { disposed = true; unlisten(); };
+  }, []);
   useEffect(() => { if (project) listTasks(project.id).then(setTasks).catch(() => setTasks([])); else setTasks([]); }, [project?.id, active]);
 
   async function startGoal(selectedProject: Project, goal: string, confirmDirtyBase: boolean) {
@@ -83,6 +93,7 @@ export function AppShell() {
           {activeView}
         </section>
       </main>
+      {quitActiveRuns != null && <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"><section aria-labelledby="quit-title" aria-modal="true" className="form-panel w-full max-w-md" role="dialog"><div><h2 className="text-base font-medium text-primary" id="quit-title">Agents are still running</h2><p className="mt-2 text-sm leading-6 text-secondary">{quitActiveRuns} active run{quitActiveRuns === 1 ? "" : "s"} would be interrupted. Keep SubShell minimized, stop the runs safely, or cancel.</p></div><div className="flex flex-wrap justify-end gap-2"><button autoFocus className="button-secondary" onClick={() => setQuitActiveRuns(null)} type="button">Cancel</button><button className="button-secondary" onClick={() => { void decideQuit("preserve"); setQuitActiveRuns(null); }} type="button">Keep running</button><button className="button-danger" onClick={() => { void decideQuit("stop"); setQuitActiveRuns(null); }} type="button">Stop and quit</button></div></section></div>}
     </div>
   );
 }
