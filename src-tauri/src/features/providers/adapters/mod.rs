@@ -140,5 +140,6 @@ mod tests {
             })
         );
         assert_eq!(parse_output(b"about 20 tokens", &[]).usage, None);
+        assert_eq!(parse_output(b"{broken json", &[]), ParsedOutput::default());
     }
 }

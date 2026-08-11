@@ -830,7 +830,18 @@ fn start_static(
 fn serve_static(mut stream: TcpStream, root: &Path) -> Result<(), std::io::Error> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut request = [0_u8; 8192];
-    let count = stream.read(&mut request)?;
+    let mut count = 0;
+    while count < request.len()
+        && !request[..count]
+            .windows(4)
+            .any(|window| window == b"\r\n\r\n")
+    {
+        let read = stream.read(&mut request[count..])?;
+        if read == 0 {
+            break;
+        }
+        count += read;
+    }
     let first = String::from_utf8_lossy(&request[..count]);
     let mut parts = first.lines().next().unwrap_or_default().split_whitespace();
     let method = parts.next().unwrap_or_default();
@@ -1027,7 +1038,8 @@ mod tests {
             }
             String::from_utf8(response).unwrap()
         };
-        assert!(get("/").contains("<h1>Preview</h1>"));
+        let index = get("/");
+        assert!(index.contains("<h1>Preview</h1>"), "{index:?}");
         assert!(get("/%2e%2e/secret").starts_with("HTTP/1.1 404"));
         assert!(get("/.git").starts_with("HTTP/1.1 404"));
         server.stop();

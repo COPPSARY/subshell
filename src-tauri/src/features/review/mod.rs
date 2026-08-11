@@ -785,7 +785,11 @@ fn io_error(error: std::io::Error) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use crate::{
+        features::{agent_api, context_sharing},
+        platform::process::{ProcessSpec, ProcessSupervisor},
+    };
+    use std::{process::Command, sync::Arc};
 
     #[test]
     fn conflict_flags_are_informational_and_deterministic() {
@@ -828,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_parallel_runs_merge_atomically_into_the_opened_checkout() {
+    fn full_loop_shares_context_reviews_approvals_merges_cleans_and_reloads() {
         let root = tempfile::tempdir().unwrap();
         let repository = root.path().join("repository");
         fs::create_dir(&repository).unwrap();
@@ -874,18 +878,107 @@ mod tests {
         let connection = database.connect().unwrap();
         connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project',?1,'now','now')", [repository.to_string_lossy()]).unwrap();
         connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')", []).unwrap();
-        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Parallel change','review',?1,?2,'now','now')", params![branch, base]).unwrap();
-        for (index, file) in ["frontend.txt", "backend.txt"].iter().enumerate() {
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Parallel change','working',?1,?2,'now','now')", params![branch, base]).unwrap();
+        let files = ["src/auth.ts", "tests/auth.test.ts"];
+        let mut worktrees = Vec::new();
+        for (index, file) in files.iter().enumerate() {
             let run_id = format!("run-{index}");
             let worktree = root.path().join(format!("worktree-{index}"));
             git.create_worktree(&repository, &base, &worktree).unwrap();
+            fs::create_dir_all(worktree.join(Path::new(file).parent().unwrap())).unwrap();
             fs::write(worktree.join(file), file).unwrap();
-            connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,assignment_title,status,merge_order,context_sha256,created_at,updated_at) VALUES(?1,'task','provider','Implement','executor',?2,'succeeded',?3,?4,'now','now')", params![run_id, file, index as i64, format!("context-{index}")]).unwrap();
+            connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,assignment_title,status,merge_order,context_sha256,created_at,updated_at) VALUES(?1,'task','provider','Implement','executor',?2,'running',?3,?4,'now','now')", params![run_id, file, index as i64, format!("context-{index}")]).unwrap();
             connection.execute("INSERT INTO worktrees(id,agent_run_id,path,base_branch,base_revision,state,created_at) VALUES(?1,?2,?3,?4,?5,'active','now')", params![format!("worktree-row-{index}"), run_id, worktree.to_string_lossy(), branch, base]).unwrap();
+            worktrees.push(worktree);
         }
+
+        let share_log = root.path().join("share.log");
+        let processes = ProcessSupervisor::default();
+        processes
+            .launch(
+                "run-1".into(),
+                ProcessSpec {
+                    executable: "/bin/sh".into(),
+                    arguments: vec!["-c".into(), "cat >/dev/null".into()],
+                    cwd: worktrees[1].clone(),
+                    environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
+                    log_path: share_log,
+                    stdin: None,
+                    redactions: vec![],
+                },
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+        let share_input = context_sharing::SharePreviewInput {
+            source_run_id: None,
+            target_run_id: "run-1".into(),
+            kind: "summary".into(),
+            content_reference: None,
+            summary: "Use the shared authentication contract".into(),
+        };
+        let share = context_sharing::preview(&database, &share_input).unwrap();
+        let delivered = context_sharing::deliver(
+            &database,
+            &processes,
+            context_sharing::ShareDeliverInput {
+                source_run_id: None,
+                target_run_id: "run-1".into(),
+                kind: "summary".into(),
+                content_reference: None,
+                content: share.content,
+                preview_sha256: share.sha256,
+            },
+        )
+        .unwrap();
+        assert_eq!(delivered.delivery_status, "delivered");
+        processes.stop("run-1").unwrap();
+
+        let denied = agent_api::request(
+            &database,
+            agent_api::RequestInput {
+                run_id: "run-0".into(),
+                action: "create_branch".into(),
+                arguments: serde_json::json!({"name":"unsafe"}),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            agent_api::decide(&database, &denied.id, "denied")
+                .unwrap()
+                .status,
+            "denied"
+        );
+        let approved_branch = agent_api::request(
+            &database,
+            agent_api::RequestInput {
+                run_id: "run-0".into(),
+                action: "create_branch".into(),
+                arguments: serde_json::json!({"name":"safe"}),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            agent_api::decide(&database, &approved_branch.id, "approved")
+                .unwrap()
+                .status,
+            "approved"
+        );
+        connection.execute("UPDATE agent_runs SET status='succeeded',ended_at='now',updated_at='now' WHERE task_id='task'", []).unwrap();
+        connection
+            .execute(
+                "UPDATE tasks SET status='review',updated_at='now' WHERE id='task'",
+                [],
+            )
+            .unwrap();
 
         let pending = get_or_create("task", &database, &paths, &git).unwrap();
         assert_eq!(pending.runs.len(), 2);
+        assert!(
+            pending
+                .conflicts
+                .iter()
+                .any(|flag| flag.category == "related_file")
+        );
         let approved = decide(
             ReviewDecisionInput {
                 attempt_id: pending.id.clone(),
@@ -913,12 +1006,12 @@ mod tests {
             Some(revision.as_str())
         );
         assert_eq!(
-            fs::read_to_string(repository.join("frontend.txt")).unwrap(),
-            "frontend.txt"
+            fs::read_to_string(repository.join(files[0])).unwrap(),
+            files[0]
         );
         assert_eq!(
-            fs::read_to_string(repository.join("backend.txt")).unwrap(),
-            "backend.txt"
+            fs::read_to_string(repository.join(files[1])).unwrap(),
+            files[1]
         );
         assert_eq!(
             tasks::get(&database, "task").unwrap().unwrap().status,
@@ -932,5 +1025,15 @@ mod tests {
                 .unwrap(),
             2
         );
+        assert!(worktrees.iter().all(|worktree| !worktree.exists()));
+        assert_eq!(database.connect().unwrap().query_row::<i64, _, _>("SELECT COUNT(*) FROM worktrees WHERE state='merged' AND cleaned_at IS NOT NULL", [], |row| row.get(0)).unwrap(), 2);
+        drop(connection);
+        drop(database);
+        let reopened = Database::initialize(&paths.data_dir.join("db.sqlite3")).unwrap();
+        assert_eq!(
+            tasks::get(&reopened, "task").unwrap().unwrap().status,
+            "archived"
+        );
+        assert!(reopened.connect().unwrap().query_row::<i64, _, _>("SELECT COUNT(*) FROM timeline_events WHERE project_id='project' AND event_type IN('context.shared','approval.denied','approval.approved','merge.succeeded')", [], |row| row.get(0)).unwrap() >= 4);
     }
 }

@@ -183,4 +183,40 @@ mod tests {
         );
         assert_eq!(events[0].event_type, "project.refreshed");
     }
+
+    #[test]
+    fn bounds_large_event_feeds_and_resumes_from_a_sequence() {
+        let root = tempdir().unwrap();
+        let database = Database::initialize(&root.path().join("db.sqlite3")).unwrap();
+        let connection = database.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('p','P','/tmp/p','now','now')", []).unwrap();
+        for index in 0..600 {
+            append(
+                &connection,
+                EventRefs {
+                    project_id: "p",
+                    ..Default::default()
+                },
+                "stress.event",
+                serde_json::json!({"index": index}),
+            )
+            .unwrap();
+        }
+        let query = |after_sequence, limit| TimelineQuery {
+            project_id: "p".into(),
+            task_id: None,
+            run_id: None,
+            provider_id: None,
+            event_type: None,
+            after_sequence,
+            limit,
+        };
+        assert_eq!(list(&database, &query(None, None)).unwrap().len(), 100);
+        let bounded = list(&database, &query(None, Some(10_000))).unwrap();
+        assert_eq!(bounded.len(), 500);
+        assert_eq!(bounded[0].sequence, 600);
+        let resumed = list(&database, &query(Some(590), Some(100))).unwrap();
+        assert_eq!(resumed.len(), 10);
+        assert!(resumed.iter().all(|event| event.sequence > 590));
+    }
 }
