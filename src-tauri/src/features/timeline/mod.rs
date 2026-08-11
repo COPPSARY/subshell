@@ -20,7 +20,7 @@ pub struct EventRefs<'a> {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineQuery {
-    pub project_id: String,
+    pub project_id: Option<String>,
     pub task_id: Option<String>,
     pub run_id: Option<String>,
     pub provider_id: Option<String>,
@@ -41,6 +41,7 @@ pub struct TimelineEvent {
     pub event_type: String,
     pub payload: Value,
     pub created_at: String,
+    pub project_name: String,
 }
 
 #[tauri::command]
@@ -68,7 +69,7 @@ pub fn append(
         params![id, refs.project_id, refs.task_id, refs.run_id, refs.provider_id, sequence, event_type, payload.to_string()],
     )?;
     connection.query_row(
-        "SELECT id,project_id,task_id,agent_run_id,provider_account_id,sequence,event_type,payload_json,created_at FROM timeline_events WHERE id=?1",
+        "SELECT e.id,e.project_id,e.task_id,e.agent_run_id,e.provider_account_id,e.sequence,e.event_type,e.payload_json,e.created_at,p.name FROM timeline_events e JOIN projects p ON p.id=e.project_id WHERE e.id=?1",
         [&id],
         row_to_event,
     ).map_err(Into::into)
@@ -77,15 +78,38 @@ pub fn append(
 fn list(database: &Database, query: &TimelineQuery) -> Result<Vec<TimelineEvent>, CommandError> {
     let connection = database.connect()?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500) as i64;
+    if query.project_id.is_none() {
+        let mut statement = connection.prepare(
+            "SELECT e.id,e.project_id,e.task_id,e.agent_run_id,e.provider_account_id,e.sequence,e.event_type,e.payload_json,e.created_at,p.name FROM timeline_events e JOIN projects p ON p.id=e.project_id
+             WHERE (?1 IS NULL OR e.task_id=?1)
+               AND (?2 IS NULL OR e.agent_run_id=?2)
+               AND (?3 IS NULL OR e.provider_account_id=?3)
+               AND (?4 IS NULL OR e.event_type=?4)
+             ORDER BY e.created_at DESC,e.id DESC LIMIT ?5",
+        )?;
+        return statement
+            .query_map(
+                params![
+                    query.task_id,
+                    query.run_id,
+                    query.provider_id,
+                    query.event_type,
+                    limit
+                ],
+                row_to_event,
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into);
+    }
     let mut statement = connection.prepare(
-        "SELECT id,project_id,task_id,agent_run_id,provider_account_id,sequence,event_type,payload_json,created_at FROM timeline_events
-         WHERE project_id=?1
-           AND (?2 IS NULL OR task_id=?2)
-           AND (?3 IS NULL OR agent_run_id=?3)
-           AND (?4 IS NULL OR provider_account_id=?4)
-           AND (?5 IS NULL OR event_type=?5)
-           AND (?6 IS NULL OR sequence>?6)
-         ORDER BY sequence DESC LIMIT ?7",
+            "SELECT e.id,e.project_id,e.task_id,e.agent_run_id,e.provider_account_id,e.sequence,e.event_type,e.payload_json,e.created_at,p.name FROM timeline_events e JOIN projects p ON p.id=e.project_id
+         WHERE e.project_id=?1
+           AND (?2 IS NULL OR e.task_id=?2)
+           AND (?3 IS NULL OR e.agent_run_id=?3)
+           AND (?4 IS NULL OR e.provider_account_id=?4)
+           AND (?5 IS NULL OR e.event_type=?5)
+           AND (?6 IS NULL OR e.sequence>?6)
+         ORDER BY e.sequence DESC LIMIT ?7",
     )?;
     statement
         .query_map(
@@ -116,6 +140,7 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineEvent> {
         event_type: row.get(6)?,
         payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
         created_at: row.get(8)?,
+        project_name: row.get(9)?,
     })
 }
 
@@ -164,7 +189,7 @@ mod tests {
         let events = list(
             &database,
             &TimelineQuery {
-                project_id: "p".into(),
+                project_id: Some("p".into()),
                 task_id: None,
                 run_id: None,
                 provider_id: None,
@@ -182,5 +207,41 @@ mod tests {
             [2, 1]
         );
         assert_eq!(events[0].event_type, "project.refreshed");
+    }
+
+    #[test]
+    fn bounds_large_event_feeds_and_resumes_from_a_sequence() {
+        let root = tempdir().unwrap();
+        let database = Database::initialize(&root.path().join("db.sqlite3")).unwrap();
+        let connection = database.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('p','P','/tmp/p','now','now')", []).unwrap();
+        for index in 0..600 {
+            append(
+                &connection,
+                EventRefs {
+                    project_id: "p",
+                    ..Default::default()
+                },
+                "stress.event",
+                serde_json::json!({"index": index}),
+            )
+            .unwrap();
+        }
+        let query = |after_sequence, limit| TimelineQuery {
+            project_id: Some("p".into()),
+            task_id: None,
+            run_id: None,
+            provider_id: None,
+            event_type: None,
+            after_sequence,
+            limit,
+        };
+        assert_eq!(list(&database, &query(None, None)).unwrap().len(), 100);
+        let bounded = list(&database, &query(None, Some(10_000))).unwrap();
+        assert_eq!(bounded.len(), 500);
+        assert_eq!(bounded[0].sequence, 600);
+        let resumed = list(&database, &query(Some(590), Some(100))).unwrap();
+        assert_eq!(resumed.len(), 10);
+        assert!(resumed.iter().all(|event| event.sequence > 590));
     }
 }

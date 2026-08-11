@@ -22,7 +22,37 @@ It is more than a terminal multiplexer: SubShell isolates each run, packages foc
 Plan → Assign → Run → Observe → Review → Merge
 ```
 
-## Getting Started
+## Install
+
+Download the newest packages from [GitHub Releases](https://github.com/COPPSARY/subshell/releases/latest). The first release supports Linux x86_64 and Windows x64.
+
+### Linux
+
+Install the latest AppImage for your user:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/COPPSARY/subshell/main/install.sh | sh
+```
+
+This installs `subshell` in `~/.local/bin` by default. Set `SUBSHELL_INSTALL_DIR` to choose another directory. The release also includes a `.deb` package for manual installation:
+
+```sh
+sudo apt install ./SubShell_*_amd64.deb
+```
+
+### Windows
+
+Run PowerShell and download and launch the latest `.exe` installer:
+
+```powershell
+irm https://raw.githubusercontent.com/COPPSARY/subshell/main/install.ps1 | iex
+```
+
+An `.msi` installer is also available on the latest release page. The first unsigned release may display a Windows SmartScreen warning; verify that the download came from `github.com/COPPSARY/subshell` before continuing.
+
+Both terminal installers resolve GitHub's latest release when they run; they do not pin `v0.0.1`. Unsupported operating systems and processor architectures stop with an explanatory error.
+
+## Development Setup
 
 Install Node.js 20+, Rust, and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/), then run:
 
@@ -37,16 +67,54 @@ For concurrent worktrees, isolate local state:
 SUBSHELL_DATA_DIR=/tmp/subshell-my-feature npm run tauri dev
 ```
 
+## Core Workflow
+
+1. Open a Git repository from **Projects**, then enter a goal.
+2. Preview the planner's context and isolated environment before starting it.
+3. Approve the proposed assignments; ready agents run in separate worktrees with separate provider config roots and localhost ports.
+4. Follow output in **Tasks**, approvals and failures in **Timeline**, and share a previewed summary, file, or output excerpt between live agents when needed.
+5. Finish the runs, inspect the exact combined diff and conflict evidence, optionally launch the combined app preview, then approve and merge the immutable review snapshot.
+
+The merge is all-or-nothing. SubShell validates in its own integration worktree, advances the selected target only on success, archives the Task, and cleans owned worktrees while preserving per-run branches.
+
+## Providers and Secrets
+
+Open **Providers** to detect Claude Code, Codex, Kiro, or Gemini, or add a custom executable. Native accounts use an isolated config directory by default. Copying an existing user config requires an explicit path; inheriting the whole user home is a separate full-access choice.
+
+Account credentials are stored in the operating-system keychain, injected only into that account's child process, and redacted from captured output. They are never stored in SQLite. Re-authenticate an account after an authentication failure; remove credentials before deleting an account that still has one.
+
+Automated tests use stand-in executables. Real provider checks are manual and should never run against contributor accounts in CI.
+
+## Keyboard and Recovery
+
+- Press `Ctrl+K` or `Cmd+K` to open the command palette. Arrow keys select, `Enter` runs a command, and `Escape` closes and restores focus.
+- All task, approval, review, and merge controls are normal keyboard-focusable controls. A skip link appears when focus enters the window.
+- Closing SubShell with active runs asks whether to keep the app supervising them in the background, stop them safely, or cancel. After a controlled restart, a dead process with a supported provider session resumes in the same Run and appends to the same log. A still-live process is never duplicated, and unrecoverable process loss keeps its log and worktree for inspection.
+
+## Preview and Troubleshooting
+
+The Review screen combines completed run worktrees in merge order without changing the opened checkout. **Preview** shows the exact command before first execution, allocates a unique localhost port, and provides logs plus Restart and Stop controls. Plain HTML/CSS/JavaScript repositories use the built-in static server; detected package or Cargo projects use their normal development command. A conflict blocks only the combined preview and identifies the conflicting files; individual run previews remain available.
+
+When an action fails, follow the preserved-state and next-step text in the error panel. Common recovery paths are:
+
+- **Backend unavailable:** restart the desktop app; repository files are untouched.
+- **Provider missing or unauthenticated:** install/configure it in Providers, then retry or resume.
+- **Target branch drifted or validation failed:** inspect the review evidence, restore a clean target, and create a fresh review snapshot.
+- **Preview failed:** inspect Server logs, correct the project command, and Restart. Closing Preview stops its process and removes only SubShell's temporary preview files.
+
 Run checks before opening a pull request:
 
 ```sh
 npm test
 npm run build:web
 npm run build
+npm run build:bundle
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 ```
+
+`npm run build` compiles the desktop executable without packaging. `npm run build:bundle` produces the host platform's distributable packages under `src-tauri/target/release/bundle/`.
 
 ## Contributing
 

@@ -10,7 +10,7 @@
   --color-line-strong: #30343c;
   --color-primary: #e2e4e8;
   --color-secondary: #9297a2;
-  --color-tertiary: #666b76;
+  --color-tertiary: #808691;
   --color-accent: #4f83ff;
   --color-accent-muted: #2563eb;
   --color-complete: #3fa66f;
@@ -36,8 +36,12 @@ html, body, #root {
 }
 
 * { box-sizing: border-box; }
-button { font: inherit; }
+button { font: inherit; touch-action: manipulation; }
 button, input, textarea, select { color: inherit; }
+select:not([multiple]) { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23838a99' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-position: right 0.6rem center; background-repeat: no-repeat; padding-right: 2rem !important; }
+select option { background: var(--color-panel); color: var(--color-primary); }
+.font-mono { font-variant-numeric: tabular-nums; }
+.virtual-row { content-visibility: auto; contain-intrinsic-size: auto 4rem; }
 
 .button-primary, .button-secondary, .button-danger, .icon-button {
   display: inline-flex;
@@ -64,6 +68,7 @@ button, input, textarea, select { color: inherit; }
 .project-goal:focus-visible { outline: none; }
 
 .form-panel { display: grid; gap: 0.8rem; border: 1px solid var(--color-line); border-radius: 0.5rem; background: var(--color-surface); padding: 1rem; }
+.form-panel.form-panel-flat { border: 0; border-radius: 0; background: transparent; padding: 0; }
 .form-panel label, .form-panel fieldset { display: grid; gap: 0.4rem; min-width: 0; border: 0; padding: 0; font-size: 0.75rem; color: var(--color-secondary); }
 .form-panel legend { margin-bottom: 0.4rem; font-size: 0.75rem; color: var(--color-secondary); }
 .form-panel input:not([type="checkbox"]), .form-panel textarea, .form-panel select { width: 100%; border: 1px solid var(--color-line-strong); border-radius: 0.35rem; background: var(--color-app); padding: 0.55rem 0.65rem; font-size: 0.8rem; color: var(--color-primary); resize: vertical; }
@@ -79,5 +84,5 @@ button, input, textarea, select { color: inherit; }
 .check-row { display: flex !important; align-items: center; gap: 0.5rem; min-height: 1.75rem; font-family: ui-monospace, monospace; font-size: 0.7rem !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition-duration: 0.01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
 }

@@ -172,7 +172,11 @@ pub fn get(database: &Database, id: &str) -> Result<Option<Task>, CommandError> 
     connection.query_row("SELECT id,project_id,title,description,status,queue_position,base_branch,base_revision,acceptance_criteria_json,allowed_paths_json,validation_commands_json,decisions_json,updated_at FROM tasks WHERE id=?1",[id],|row|Ok(Task{id:row.get(0)?,project_id:row.get(1)?,title:row.get(2)?,description:row.get(3)?,status:row.get(4)?,queue_position:row.get(5)?,base_branch:row.get(6)?,base_revision:row.get(7)?,acceptance_criteria:parse(row.get(8)?),allowed_paths:parse(row.get(9)?),validation_commands:parse(row.get(10)?),decisions:parse(row.get(11)?),updated_at:row.get(12)?})).optional().map_err(Into::into)
 }
 
-fn update_status(database: &Database, id: &str, status: &str) -> Result<Task, CommandError> {
+pub(crate) fn update_status(
+    database: &Database,
+    id: &str,
+    status: &str,
+) -> Result<Task, CommandError> {
     const STATUSES: [&str; 11] = [
         "idea",
         "task",
@@ -207,7 +211,7 @@ fn update_status(database: &Database, id: &str, status: &str) -> Result<Task, Co
             format!("Task cannot move from {current} to {status}"),
         ));
     }
-    let active_runs: i64 = connection.query_row("SELECT COUNT(*) FROM agent_runs WHERE task_id=?1 AND status IN ('queued','preparing','running')", [id], |row| row.get(0))?;
+    let active_runs: i64 = connection.query_row("SELECT COUNT(*) FROM agent_runs WHERE task_id=?1 AND status IN ('queued','preparing','running','waiting')", [id], |row| row.get(0))?;
     if active_runs > 0 && !matches!(status, "working" | "waiting") {
         return Err(CommandError::new(
             "task_has_active_runs",
@@ -230,6 +234,9 @@ fn update_status(database: &Database, id: &str, status: &str) -> Result<Task, Co
             "task.status_changed",
             serde_json::json!({ "from": current, "to": status }),
         )?;
+    }
+    if current == "archived" && status == "task" {
+        rollup_in_transaction(&transaction, id)?;
     }
     transaction.commit()?;
     get(database, id)?
@@ -271,8 +278,9 @@ pub(crate) fn rollup_in_transaction(
         [task_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let mut statement =
-        connection.prepare("SELECT status FROM agent_runs WHERE task_id=?1 ORDER BY created_at")?;
+    let mut statement = connection.prepare(
+        "SELECT status FROM agent_runs WHERE task_id=?1 AND role<>'planner' ORDER BY created_at",
+    )?;
     let statuses = statement
         .query_map([task_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -304,6 +312,9 @@ pub(crate) fn rollup_in_transaction(
 
 fn can_transition(from: &str, to: &str) -> bool {
     const BOARD_STATUSES: [&str; 5] = ["task", "working", "review", "failed", "approved"];
+    if from != "archived" && to == "archived" {
+        return true;
+    }
     if from != "archived" && BOARD_STATUSES.contains(&to) {
         return true;
     }
@@ -435,6 +446,27 @@ mod tests {
         assert_eq!(update_status(&db, &task.id, "task").unwrap().status, "task");
         assert!(list(&db, &task.project_id, true).unwrap().is_empty());
         assert_eq!(
+            update_status(&db, &task.id, "working").unwrap().status,
+            "working"
+        );
+        let connection = db.connect().unwrap();
+        connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Provider','/tmp/provider','active','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,created_at,updated_at) VALUES('run',?1,'provider','Wait','waiting','now','now')", [&task.id]).unwrap();
+        assert_eq!(
+            update_status(&db, &task.id, "archived").unwrap_err().code,
+            "task_has_active_runs"
+        );
+        connection
+            .execute(
+                "UPDATE agent_runs SET status='succeeded' WHERE id='run'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            update_status(&db, &task.id, "archived").unwrap().status,
+            "archived"
+        );
+        assert_eq!(
             update_status(&db, &task.id, "unknown").unwrap_err().code,
             "invalid_task_status"
         );
@@ -457,5 +489,21 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn restoring_completed_runs_returns_the_task_to_review() {
+        let root = tempdir().unwrap();
+        let db = Database::initialize(&root.path().join("db")).unwrap();
+        let connection = db.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/project','now','now')", []).unwrap();
+        connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at,archived_at) VALUES('task','project','Restored work','archived','main','base','now','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,role,created_at,updated_at) VALUES('run','task','provider','Done','succeeded','executor','now','now')", []).unwrap();
+
+        let restored = update_status(&db, "task", "task").unwrap();
+
+        assert_eq!(restored.status, "review");
+        assert!(list(&db, "project", true).unwrap().is_empty());
     }
 }

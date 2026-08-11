@@ -1,4 +1,4 @@
 export { RunWorkspace } from "./RunWorkspace";
 export { AgentsView } from "./AgentsView";
-export { listRuns } from "./api";
-export type { Run, TaskPlan } from "./model";
+export { decideQuit, getRunResources, listRuns, stopRun } from "./api";
+export type { ProcessUsage, Run, TaskPlan } from "./model";

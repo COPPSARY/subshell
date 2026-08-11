@@ -14,12 +14,13 @@ type Props = {
   onNewSession: () => void;
   onComplete: (id: string) => void;
   onResume: (id: string) => void;
+  onRetry: (id: string) => void;
   onStop: (id: string) => void;
   runs: Run[];
   subscribeOutput: SubscribeRunOutput;
 };
 
-export function RunInspector({ activeRunId, baseBranch, baseRevision, onComplete, onNewSession, onResume, onSelectRun, onStop, runs, subscribeOutput }: Props) {
+export function RunInspector({ activeRunId, baseBranch, baseRevision, onComplete, onNewSession, onResume, onRetry, onSelectRun, onStop, runs, subscribeOutput }: Props) {
   const run = runs.find((item) => item.id === activeRunId) ?? runs[0];
   const runIndex = runs.indexOf(run);
   const [view, setView] = useState<"terminal" | "changes">("terminal");
@@ -34,7 +35,7 @@ export function RunInspector({ activeRunId, baseBranch, baseRevision, onComplete
           <button aria-label="Changes" aria-selected={view === "changes"} className="flex min-h-8 items-center gap-2 rounded px-2 text-xs text-secondary hover:bg-panel aria-selected:bg-panel aria-selected:text-primary" onClick={() => setView("changes")} role="tab" type="button"><FileDiff size={13} />Changes <span className="font-mono text-[10px]">{diff?.files.length ?? 0}</span></button>
           <span className="ml-auto hidden truncate text-[11px] text-tertiary xl:block">{agentLabel(run, runIndex)} · {running ? "click terminal to type" : `session ${run.status}`}</span>{running && run.role !== "planner" && <button className="button-primary ml-2" onClick={() => onComplete(run.id)} title="End this CLI session and keep its changes for combined review" type="button"><Check size={12} />Finish run</button>}{running && <button className="button-danger ml-1" onClick={() => onStop(run.id)} type="button"><Square size={11} />Stop</button>}
         </div>
-        {view === "terminal" ? <div className="relative min-h-0 flex-1" role="tabpanel" aria-label="Terminal"><RunTerminal interactive={running} runId={run.id} subscribe={subscribeOutput} />{!running && <div className="absolute inset-x-0 bottom-0 flex items-center gap-3 border-t border-line bg-chrome/95 px-3 py-2 text-xs text-secondary"><span className={`size-2 rounded-full ${statusDot(run.status)}`} /><span>This session is {run.status}. Its terminal is read-only.</span><div className="ml-auto flex gap-2">{run.role !== "planner" && ["failed", "cancelled"].includes(run.status) && Boolean(diff?.files.length) && <button className="button-primary" onClick={() => onComplete(run.id)} type="button"><Check size={13} />Keep changes for review</button>}{run.canResume ? <button className="button-secondary" onClick={() => onResume(run.id)} type="button"><RotateCcw size={13} />Resume session</button> : <button className="button-secondary" onClick={onNewSession} type="button"><Plus size={13} />New session</button>}</div></div>}</div> : <div className="min-h-0 flex-1" role="tabpanel" aria-label="Changes"><Changes diff={diff} error={error} /></div>}
+        {view === "terminal" ? <div className="relative min-h-0 flex-1" role="tabpanel" aria-label="Terminal"><RunTerminal interactive={running} runId={run.id} subscribe={subscribeOutput} />{!running && <div className="absolute inset-x-0 bottom-0 flex items-center gap-3 border-t border-line bg-chrome/95 px-3 py-2 text-xs text-secondary"><span className={`size-2 rounded-full ${statusDot(run.status)}`} /><span>{run.waitingReason ?? `This session is ${run.status}. Its terminal is read-only.`}</span><div className="ml-auto flex gap-2">{run.role !== "planner" && ["failed", "cancelled"].includes(run.status) && Boolean(diff?.files.length) && <button className="button-primary" onClick={() => onComplete(run.id)} type="button"><Check size={13} />Keep changes for review</button>}{run.canResume ? <button className="button-secondary" onClick={() => onResume(run.id)} type="button"><RotateCcw size={13} />Resume session</button> : ["failed", "cancelled", "succeeded"].includes(run.status) ? <button className="button-secondary" onClick={() => onRetry(run.id)} type="button"><RotateCcw size={13} />Re-run with state</button> : <button className="button-secondary" onClick={onNewSession} type="button"><Plus size={13} />New session</button>}</div></div>}</div> : <div className="min-h-0 flex-1" role="tabpanel" aria-label="Changes"><Changes diff={diff} error={error} /></div>}
       </div>
 
       <aside className="hidden min-w-0 overflow-y-auto bg-chrome p-4 2xl:block" aria-label="Agent details">
@@ -46,6 +47,7 @@ export function RunInspector({ activeRunId, baseBranch, baseRevision, onComplete
           <div><dt className="text-tertiary">Status</dt><dd className="mt-1 text-primary">{run.status}</dd></div>
           <div><dt className="text-tertiary">Base</dt><dd className="mt-1 flex items-center gap-1.5 font-mono text-[11px] text-secondary"><GitBranch size={12} />{baseBranch} · {baseRevision.slice(0, 8)}</dd></div>
           <div><dt className="text-tertiary">Worktree</dt><dd className="mt-1 break-all font-mono text-[10px] leading-4 text-secondary">{run.worktreePath ?? "Preparing…"}</dd></div>
+          {(run.reportedInputTokens != null || run.reportedOutputTokens != null) && <div><dt className="text-tertiary">Provider-reported usage</dt><dd className="mt-1 font-mono text-[11px] text-secondary">{run.reportedInputTokens ?? "?"} in · {run.reportedOutputTokens ?? "?"} out</dd></div>}
         </dl>
         <div className="mt-5 border-t border-line pt-4"><button className="flex w-full items-center text-left text-xs font-medium text-primary" onClick={() => setView("changes")} type="button"><span className="flex-1">Changed files</span><span className="font-mono text-tertiary">{diff?.files.length ?? 0}</span></button>
           {error ? <p className="mt-2 text-xs text-failed">Could not read changes.</p> : diff?.files.length ? <ul className="mt-2 max-h-48 overflow-auto">{diff.files.map((file) => <li className="truncate py-1 font-mono text-[10px] text-secondary" key={file}>{file}</li>)}</ul> : <p className="mt-2 text-xs text-tertiary">No changes yet.</p>}

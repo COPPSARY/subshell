@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Archive, Check, ChevronDown, ChevronRight, CircleStop, CircleX, FolderGit2, GitBranch, MoreHorizontal, RotateCcw } from "lucide-react";
+import { Archive, Check, ChevronDown, ChevronRight, CircleStop, CircleX, FolderGit2, GitBranch, RotateCcw } from "lucide-react";
 import type { Project } from "../features/projects";
 import { ProviderIcon } from "../features/providers";
 import { listRuns, type Run } from "../features/runs";
@@ -14,13 +14,10 @@ type Props = {
   onArchived?: (taskId: string) => void;
 };
 
-const terminalTaskStatuses = new Set(["review", "approved", "merged", "failed", "cancelled"]);
-
 export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect, onArchived }: Props) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [archivedTasks, setArchivedTasks] = useState<Task[]>([]);
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [error, setError] = useState("");
 
@@ -42,19 +39,9 @@ export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect
     return () => { mounted = false; window.clearInterval(timer); };
   }, [project?.id, reload]);
 
-  useEffect(() => {
-    if (!menuTaskId) return;
-    const close = () => setMenuTaskId(null);
-    const keydown = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", keydown);
-    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", keydown); };
-  }, [menuTaskId]);
-
   async function archiveTask(task: Task) {
     try {
       await updateTaskStatus(task.id, "archived");
-      setMenuTaskId(null);
       setReload((value) => value + 1);
       onArchived?.(task.id);
     } catch (reason) {
@@ -72,7 +59,7 @@ export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect
     }
   }
 
-  const activeAgents = workspaces.flatMap((workspace) => workspace.runs).filter((run) => ["queued", "preparing", "running"].includes(run.status)).length;
+  const activeAgents = workspaces.flatMap((workspace) => workspace.runs).filter((run) => ["queued", "preparing", "running", "waiting"].includes(run.status)).length;
 
   return <section className="flex min-h-0 flex-1 flex-col px-2.5 py-3" aria-label="Workspaces">
     <div className="min-h-0 flex-1 overflow-y-auto">
@@ -86,23 +73,22 @@ export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect
       {error && <p className="px-2 py-2 text-xs text-failed" role="alert">{error}</p>}
       {project && !error && !workspaces.length ? <div className="px-2 py-4"><p className="text-xs font-medium text-secondary">No active workspaces</p><p className="mt-1 text-[11px] leading-4 text-tertiary">Start a goal or restore one from Archive.</p></div> : project && <div className="ml-3 border-l border-line/70 pl-2">
         {workspaces.map(({ task, runs }) => {
-          const canArchive = terminalTaskStatuses.has(task.status) && runs.every((run) => ["succeeded", "failed", "cancelled"].includes(run.status));
+          const canArchive = !runs.some((run) => ["queued", "preparing", "running", "waiting"].includes(run.status));
           const taskSelected = task.id === selectedTaskId && !selectedRunId;
           return <div className="relative mb-0.5" key={task.id}>
             <span aria-hidden="true" className={`absolute -left-2 top-4 h-px w-2 ${taskSelected ? "bg-accent" : "bg-line/70"}`} />
-            <div className="group relative flex items-center" onContextMenu={(event) => { if (!canArchive) return; event.preventDefault(); setMenuTaskId(task.id); }}>
+            <div className="group relative flex items-center">
               <button aria-current={taskSelected ? "page" : undefined} className="group/task flex h-9 min-w-0 flex-1 items-center gap-2 px-2 text-left text-xs text-secondary outline-none hover:text-primary focus-visible:ring-1 focus-visible:ring-line-strong aria-[current=page]:text-primary" onClick={() => onSelect(task)} type="button">
                 <GitBranch aria-hidden="true" className="shrink-0 text-tertiary group-hover/task:text-secondary group-aria-[current=page]/task:text-accent" size={13} />
                 <span className="min-w-0 flex-1 truncate font-medium">{task.title}</span>
                 <StateIndicator status={task.status} />
               </button>
-              {canArchive && <button aria-label={`Workspace actions for ${task.title}`} aria-expanded={menuTaskId === task.id} className="absolute right-5 flex size-7 items-center justify-center text-tertiary opacity-0 outline-none hover:text-primary focus:opacity-100 focus-visible:ring-1 focus-visible:ring-line-strong group-hover:opacity-100" onClick={(event) => { event.stopPropagation(); setMenuTaskId((current) => current === task.id ? null : task.id); }} type="button"><MoreHorizontal aria-hidden="true" size={13} /></button>}
-              {menuTaskId === task.id && <div className="absolute right-1 top-8 z-20 min-w-36 border border-line-strong bg-panel p-1" role="menu"><button className="flex h-8 w-full items-center gap-2 px-2 text-left text-[11px] text-secondary outline-none hover:bg-selected hover:text-primary focus-visible:bg-selected focus-visible:text-primary" onClick={() => archiveTask(task)} role="menuitem" type="button"><Archive aria-hidden="true" size={13} />Archive workspace</button></div>}
+              {canArchive && <button aria-label={`Archive workspace ${task.title}`} className="flex size-7 shrink-0 items-center justify-center text-tertiary outline-none hover:text-primary focus-visible:ring-1 focus-visible:ring-line-strong" onClick={() => archiveTask(task)} title="Archive workspace" type="button"><Archive aria-hidden="true" size={13} /></button>}
             </div>
 
             {runs.length > 0 && <div className="ml-4 border-l border-line/70 pl-2">{runs.map((run, index) => {
               const runSelected = run.id === selectedRunId;
-              return <div className="relative" key={run.id} onContextMenu={(event) => { if (!canArchive) return; event.preventDefault(); setMenuTaskId(task.id); }}><span aria-hidden="true" className={`absolute -left-2 top-4 h-px w-2 ${runSelected ? "bg-accent" : "bg-line/70"}`} /><button aria-current={runSelected ? "page" : undefined} className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-[11px] text-tertiary outline-none hover:text-primary focus-visible:ring-1 focus-visible:ring-line-strong aria-[current=page]:bg-surface/70 aria-[current=page]:text-primary" onClick={() => onSelect(task, run.id)} type="button"><ProviderIcon aria-hidden="true" className="text-secondary" name={run.providerName} size={12} /><span className="min-w-0 flex-1 truncate"><strong className="font-medium text-secondary">{runLabel(run, index)}</strong><span className="text-tertiary"> · {run.providerName}</span></span><StateIndicator status={run.status} /></button></div>;
+              return <div className="relative" key={run.id}><span aria-hidden="true" className={`absolute -left-2 top-4 h-px w-2 ${runSelected ? "bg-accent" : "bg-line/70"}`} /><button aria-current={runSelected ? "page" : undefined} className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-[11px] text-tertiary outline-none hover:text-primary focus-visible:ring-1 focus-visible:ring-line-strong aria-[current=page]:bg-surface/70 aria-[current=page]:text-primary" onClick={() => onSelect(task, run.id)} type="button"><ProviderIcon aria-hidden="true" className="text-secondary" name={run.providerName} size={12} /><span className="min-w-0 flex-1 truncate"><strong className="font-medium text-secondary">{runLabel(run, index)}</strong><span className="text-tertiary"> · {run.providerName}</span></span><StateIndicator status={run.status} /></button></div>;
             })}</div>}
           </div>;
         })}

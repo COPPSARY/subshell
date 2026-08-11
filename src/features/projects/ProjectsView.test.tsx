@@ -45,3 +45,11 @@ it("explains that a newly initialized repository needs its first commit", async 
   expect(screen.queryByText(/Git is required/i)).toBeNull();
   expect(screen.queryByRole("button", { name: "Start agent" })).toBeNull();
 });
+
+it("turns a missing desktop backend into an actionable error", async () => {
+  vi.mocked(listProjects).mockRejectedValueOnce(new TypeError("Cannot read properties of undefined (reading 'invoke')"));
+
+  render(<ProjectsView />);
+
+  expect((await screen.findByRole("alert")).textContent).toContain("Restart the desktop app, then try again");
+});

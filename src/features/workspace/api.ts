@@ -1,0 +1,23 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { AgentTemplate, Bookmark, Dashboard, EnvironmentProfile, ExplorerAgent, MergeQueueItem, WorkspaceSearchResult, WorkspaceSnapshot } from "./model";
+
+const page = <T>(command: string, input: object) => invoke<{ items: T[] }>(command, { input }).then((value) => value.items);
+export const listAgentTemplates = (projectId: string) => page<AgentTemplate>("workspace_templates_list", { projectId });
+export const saveAgentTemplate = (input: AgentTemplate) => invoke<AgentTemplate>("workspace_template_save", { input });
+export const removeAgentTemplate = (id: string) => invoke<void>("workspace_template_remove", { input: { id } });
+export const listEnvironmentProfiles = (projectId: string) => page<EnvironmentProfile>("workspace_profiles_list", { projectId });
+export const saveEnvironmentProfile = (input: EnvironmentProfile) => invoke<EnvironmentProfile>("workspace_profile_save", { input });
+export const removeEnvironmentProfile = (id: string) => invoke<void>("workspace_profile_remove", { input: { id } });
+export const applyEnvironmentProfile = (profileId: string, taskId: string) => invoke<EnvironmentProfile>("workspace_profile_apply", { input: { profileId, taskId } });
+export const searchWorkspace = (query: string, projectId: string | null = null) => page<WorkspaceSearchResult>("workspace_search", { query, projectId });
+export const listBookmarks = (projectId: string) => page<Bookmark>("workspace_bookmarks_list", { projectId });
+export const toggleBookmark = (projectId: string, targetKind: "task" | "run" | "event", targetId: string, label = "") => invoke<Bookmark | null>("workspace_bookmark_toggle", { input: { projectId, targetKind, targetId, label } });
+export const listSnapshots = (projectId: string) => page<WorkspaceSnapshot>("workspace_snapshots_list", { projectId });
+export const createSnapshot = (runId: string, kind: "checkpoint" | "snapshot", label = "") => invoke<WorkspaceSnapshot>("workspace_snapshot_create", { input: { runId, kind, label } });
+export const rollbackSnapshot = (id: string) => invoke<WorkspaceSnapshot>("workspace_snapshot_rollback", { input: { id } });
+export const listMergeQueue = (projectId: string) => page<MergeQueueItem>("workspace_merge_queue_list", { projectId });
+export const enqueueMerge = (attemptId: string, fingerprint: string) => invoke<MergeQueueItem>("workspace_merge_queue_enqueue", { input: { attemptId, fingerprint } });
+export const processMergeQueue = (projectId: string) => invoke<MergeQueueItem>("workspace_merge_queue_process", { input: { projectId } });
+export const setUsageLimit = (scope: "project" | "task" | "agent", id: string, unitLimit: number | null) => invoke<void>("workspace_set_limit", { input: { scope, id, unitLimit } });
+export const getDashboard = (projectId: string) => invoke<Dashboard>("workspace_dashboard", { input: { projectId } });
+export const listExplorerAgents = (projectId: string) => page<ExplorerAgent>("workspace_agents_list", { projectId });

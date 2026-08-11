@@ -8,11 +8,11 @@ vi.mock("../attention", () => ({ acknowledgeAttention:vi.fn(),claimAttentionNoti
 vi.mock("./api", () => ({ listTimeline:vi.fn() }));
 
 beforeEach(() => {
-  vi.mocked(listTimeline).mockResolvedValue([{ id:"e1",projectId:"p",taskId:"t",runId:"r",providerId:"provider",sequence:4,eventType:"run.status_changed",payload:{to:"failed"},createdAt:"now" }]);
+  vi.mocked(listTimeline).mockResolvedValue([{ id:"e1",projectId:"p",projectName:"Repo",taskId:"t",runId:"r",providerId:"provider",sequence:4,eventType:"run.status_changed",payload:{to:"failed"},createdAt:"now" }]);
   vi.mocked(listAttention).mockResolvedValue([{ key:"approval:a",reason:"approval_waiting",projectId:"p",taskId:"t",runId:"r",approvalRequestId:"a",title:"Fix",detail:"Agent requested: merge_task",stateFingerprint:"pending:now",acknowledged:false,createdAt:"now" }]);
-  vi.mocked(listApprovals).mockResolvedValue([{ id:"a",projectId:"p",taskId:"t",runId:"r",action:"merge_task",arguments:{},status:"pending",requestedBy:"agent",createdAt:"now",decidedAt:null }]);
+  vi.mocked(listApprovals).mockResolvedValue([{ id:"a",projectId:"p",taskId:"t",runId:"r",action:"merge_task",arguments:{ attemptId:"review-1",fingerprint:"exact" },status:"pending",requestedBy:"agent",createdAt:"now",decidedAt:null,executionStatus:"not_started",executionResult:null,executionErrorCode:null,executionErrorMessage:null,executedAt:null }]);
   vi.mocked(acknowledgeAttention).mockResolvedValue(undefined);
-  vi.mocked(decideApproval).mockResolvedValue({ id:"a",projectId:"p",taskId:"t",runId:"r",action:"merge_task",arguments:{},status:"approved",requestedBy:"agent",createdAt:"now",decidedAt:"later" });
+  vi.mocked(decideApproval).mockResolvedValue({ id:"a",projectId:"p",taskId:"t",runId:"r",action:"merge_task",arguments:{ attemptId:"review-1",fingerprint:"exact" },status:"approved",requestedBy:"agent",createdAt:"now",decidedAt:"later",executionStatus:"succeeded",executionResult:{ revision:"abc" },executionErrorCode:null,executionErrorMessage:null,executedAt:"later" });
 });
 
 it("renders ordered activity and routes exact attention decisions", async () => {
@@ -22,6 +22,7 @@ it("renders ordered activity and routes exact attention decisions", async () => 
   const timeline = screen.getByRole("region", { name: "Project timeline" });
   fireEvent.click(within(timeline).getByRole("button", { name:"Open Fix" }));
   expect(open).toHaveBeenCalledWith("t", "r");
-  fireEvent.click(screen.getByRole("button", { name:"Approve" }));
+  expect(screen.getByText(/review-1/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name:"Approve command" }));
   await waitFor(() => expect(decideApproval).toHaveBeenCalledWith("a", "approved"));
 });

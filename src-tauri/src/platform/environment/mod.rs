@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::contracts::CommandError;
 
@@ -43,7 +43,7 @@ impl PortLeases {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentPreview {
     pub files: Vec<String>,

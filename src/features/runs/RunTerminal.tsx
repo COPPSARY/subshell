@@ -65,13 +65,13 @@ export function RunTerminal({ runId, subscribe, interactive = true }: { runId: s
         };
         if (output.bytes.length) instance.write(new Uint8Array(output.bytes), ready); else ready();
       }).finally(() => { if (!disposed && interactive) recovery = window.setInterval(catchUp, 2000); });
-      let inputBuffer = ""; let inputFrame: number | undefined; let inputQueue = Promise.resolve();
-      const flushInput = () => { inputFrame = undefined; const data = inputBuffer; inputBuffer = ""; if (data) inputQueue = inputQueue.then(() => writeRunInput(runId, Array.from(new TextEncoder().encode(data)))).catch(() => undefined); };
-      const input = interactive ? instance.onData((data) => { inputBuffer += data; inputFrame ??= window.requestAnimationFrame(flushInput); }) : null;
+      let inputBuffer = ""; let inputScheduled = false; let inputQueue = Promise.resolve();
+      const flushInput = () => { inputScheduled = false; const data = inputBuffer; inputBuffer = ""; if (data) inputQueue = inputQueue.then(() => writeRunInput(runId, Array.from(new TextEncoder().encode(data)))).catch(() => undefined); };
+      const input = interactive ? instance.onData((data) => { inputBuffer += data; if (!inputScheduled) { inputScheduled = true; queueMicrotask(flushInput); } }) : null;
       let resizeFrame: number | undefined; let lastRows = 0; let lastCols = 0;
       const resize = () => { resizeFrame ??= window.requestAnimationFrame(() => { resizeFrame = undefined; fit.fit(); if (interactive && (instance.rows !== lastRows || instance.cols !== lastCols)) { lastRows = instance.rows; lastCols = instance.cols; resizeRun(runId, instance.rows, instance.cols).catch(() => undefined); } }); };
       const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize); observer?.observe(host.current);
-      cleanup = () => { if (recovery) window.clearInterval(recovery); if (outputFrame !== undefined) window.cancelAnimationFrame(outputFrame); if (inputFrame !== undefined) window.cancelAnimationFrame(inputFrame); if (resizeFrame !== undefined) window.cancelAnimationFrame(resizeFrame); flushInput(); unsubscribe(); observer?.disconnect(); input?.dispose(); instance.dispose(); terminal.current = null; };
+      cleanup = () => { if (recovery) window.clearInterval(recovery); if (outputFrame !== undefined) window.cancelAnimationFrame(outputFrame); if (resizeFrame !== undefined) window.cancelAnimationFrame(resizeFrame); flushInput(); unsubscribe(); observer?.disconnect(); input?.dispose(); instance.dispose(); terminal.current = null; };
     });
     return () => { disposed = true; cleanup(); };
   }, [interactive, runId, subscribe]);

@@ -84,7 +84,10 @@ pub fn context_share_deliver(
     deliver(&database, &processes, input)
 }
 
-fn preview(database: &Database, input: &SharePreviewInput) -> Result<SharePreview, CommandError> {
+pub(crate) fn preview(
+    database: &Database,
+    input: &SharePreviewInput,
+) -> Result<SharePreview, CommandError> {
     validate_kind(&input.kind)?;
     let (task_id, _) = target(database, &input.target_run_id)?;
     let content = match input.kind.as_str() {
@@ -127,7 +130,7 @@ fn preview(database: &Database, input: &SharePreviewInput) -> Result<SharePrevie
     })
 }
 
-fn deliver(
+pub(crate) fn deliver(
     database: &Database,
     processes: &ProcessSupervisor,
     input: ShareDeliverInput,
@@ -375,6 +378,7 @@ mod tests {
                     environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
                     log_path: root.path().join("output.log"),
                     stdin: None,
+                    redactions: vec![],
                 },
                 Arc::new(|_: ProcessNotice| {}),
             )

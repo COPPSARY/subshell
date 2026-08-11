@@ -1,11 +1,14 @@
+pub mod agent_actions;
 pub mod agent_api;
 pub mod attention;
 pub mod context;
 pub mod context_sharing;
 pub mod health;
+pub mod preview;
 pub mod projects;
 pub mod providers;
 pub mod review;
 pub mod runs;
 pub mod tasks;
 pub mod timeline;
+pub mod workspace;

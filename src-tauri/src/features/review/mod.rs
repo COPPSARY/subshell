@@ -101,6 +101,11 @@ struct CapturedRun {
     patch: Vec<u8>,
 }
 
+pub(crate) struct VerifiedReview {
+    pub review: Review,
+    pub project_path: PathBuf,
+}
+
 #[tauri::command]
 pub fn review_get(
     input: TaskInput,
@@ -145,12 +150,17 @@ pub fn review_merge(
     merge(input, &database, &paths, &git)
 }
 
-fn get_or_create(
+pub(crate) fn get_or_create(
     task_id: &str,
     database: &Database,
     paths: &RuntimePaths,
     git: &GitService,
 ) -> Result<Review, CommandError> {
+    if let Some(review) = latest_review(database, task_id)?
+        && review.decision == "approved"
+    {
+        return Ok(review);
+    }
     let task = reviewable_task(database, task_id)?;
     let evidence = validation_evidence(database, task_id)?;
     let captured = capture_runs(database, git, &task)?;
@@ -229,7 +239,7 @@ fn get_or_create(
         .ok_or_else(|| CommandError::new("review_not_found", "Review was not created"))
 }
 
-fn decide(
+pub(crate) fn decide(
     input: ReviewDecisionInput,
     decision: &str,
     database: &Database,
@@ -286,7 +296,7 @@ fn decide(
     review_by_id(database, &input.attempt_id)
 }
 
-fn merge(
+pub(crate) fn merge(
     input: MergeInput,
     database: &Database,
     paths: &RuntimePaths,
@@ -301,14 +311,7 @@ fn merge(
     }
     let task = tasks::get(database, &review.task_id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
-    let current = capture_runs(database, git, &task)?;
-    let evidence = validation_evidence(database, &task.id)?;
-    if fingerprint(&task.base_revision, &current, &evidence)? != review.fingerprint {
-        return Err(CommandError::new(
-            "review_stale",
-            "Agent changes changed after approval; assemble a new review",
-        ));
-    }
+    verify_stored_patches(&review)?;
     let project_path = project_path(database, &task.project_id)?;
     let target = git.status(&project_path)?;
     if target.branch.as_deref() != Some(&task.base_branch)
@@ -349,6 +352,62 @@ fn merge(
         )?;
     }
     result
+}
+
+pub(crate) fn queue_candidate(
+    database: &Database,
+    attempt_id: &str,
+    fingerprint: &str,
+) -> Result<(String, String), CommandError> {
+    let review = review_by_id(database, attempt_id)?;
+    if review.decision != "approved" || review.fingerprint != fingerprint {
+        return Err(CommandError::new(
+            "review_not_approved",
+            "Approve this exact review before adding it to the merge queue",
+        ));
+    }
+    let task = tasks::get(database, &review.task_id)?
+        .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
+    Ok((task.id, task.project_id))
+}
+
+pub(crate) fn verified_review(
+    attempt_id: &str,
+    expected_fingerprint: &str,
+    database: &Database,
+) -> Result<VerifiedReview, CommandError> {
+    let review = review_by_id(database, attempt_id)?;
+    if review.fingerprint != expected_fingerprint {
+        return Err(CommandError::new(
+            "review_fingerprint_mismatch",
+            "The visible review is not the requested preview",
+        ));
+    }
+    let task = tasks::get(database, &review.task_id)?
+        .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
+    verify_stored_patches(&review)?;
+    Ok(VerifiedReview {
+        project_path: project_path(database, &task.project_id)?,
+        review,
+    })
+}
+
+fn verify_stored_patches(review: &Review) -> Result<(), CommandError> {
+    for run in &review.runs {
+        let patch = fs::read(&run.patch_path).map_err(|_| {
+            CommandError::new(
+                "review_artifact_missing",
+                "A saved review patch is unavailable; restore the SubShell data directory or assemble a new review",
+            )
+        })?;
+        if sha256(&patch) != run.patch_sha256 {
+            return Err(CommandError::new(
+                "review_corrupt",
+                "A saved review patch no longer matches its fingerprint",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn perform_merge(
@@ -444,13 +503,14 @@ fn perform_merge(
                 |row| row.get(0),
             )
             .optional()?;
-        if let Some(path) = path
-            && git.remove_worktree(project_path, Path::new(&path)).is_ok()
-        {
-            database.connect()?.execute(
-                "UPDATE worktrees SET state='merged',cleaned_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_run_id=?1",
-                [&run.run_id],
-            )?;
+        if let Some(path) = path {
+            let path = Path::new(&path);
+            if !path.exists() || git.remove_worktree(project_path, path).is_ok() {
+                database.connect()?.execute(
+                    "UPDATE worktrees SET state='merged',cleaned_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE agent_run_id=?1",
+                    [&run.run_id],
+                )?;
+            }
         }
     }
     Ok(integrated)
@@ -676,13 +736,28 @@ fn review_by_id(database: &Database, id: &str) -> Result<Review, CommandError> {
 }
 
 fn reviewable_task(database: &Database, task_id: &str) -> Result<tasks::Task, CommandError> {
+    let mut connection = database.connect()?;
+    let transaction = connection.transaction()?;
+    tasks::rollup_in_transaction(&transaction, task_id)?;
+    transaction.commit()?;
     let task = tasks::get(database, task_id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?;
     if !matches!(task.status.as_str(), "review" | "approved") {
-        return Err(CommandError::new(
-            "task_not_reviewable",
-            "Task must be ready for review",
-        ));
+        let (implementations, active, failed): (i64, i64, i64) = database.connect()?.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(status IN('queued','preparing','running','waiting')),0),COALESCE(SUM(status IN('failed','cancelled')),0) FROM agent_runs WHERE task_id=?1 AND role<>'planner'",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let message = if implementations == 0 {
+            "Approve the planner's proposed assignments or start an implementation agent first"
+        } else if active > 0 {
+            "Finish the active implementation agents before opening Review"
+        } else if failed > 0 {
+            "Retry failed agents or keep their changes before opening Review"
+        } else {
+            "Every implementation agent must finish before opening Review"
+        };
+        return Err(CommandError::new("task_not_reviewable", message));
     }
     Ok(task)
 }
@@ -752,7 +827,64 @@ fn io_error(error: std::io::Error) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use crate::{
+        features::{context::ContextDrafts, runs::RunService},
+        platform::{
+            environment::PortLeases,
+            keychain::MemorySecretStore,
+            process::{ProcessSpec, ProcessSupervisor},
+        },
+    };
+    use std::{process::Command, sync::Arc};
+    use tauri::webview::InvokeRequest;
+
+    fn invoke(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        command: &str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        tauri::test::get_ipc_response(
+            webview,
+            InvokeRequest {
+                cmd: command.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({"input": input})),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.into(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("{command} failed: {error}"))
+        .deserialize()
+        .unwrap()
+    }
+
+    #[test]
+    fn completed_runs_reconcile_a_stale_task_before_review() {
+        let root = tempfile::tempdir().unwrap();
+        let database = Database::initialize(&root.path().join("db.sqlite3")).unwrap();
+        let connection = database.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/repo','now','now')", []).unwrap();
+        connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Completed work','working','main','base','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,status,merge_order,created_at,updated_at) VALUES('run','task','provider','Implement','implementer','running',0,'now','now')", []).unwrap();
+        drop(connection);
+
+        assert_eq!(
+            reviewable_task(&database, "task").unwrap_err().message,
+            "Finish the active implementation agents before opening Review"
+        );
+        database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE agent_runs SET status='succeeded' WHERE id='run'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(reviewable_task(&database, "task").unwrap().status, "review");
+    }
 
     #[test]
     fn conflict_flags_are_informational_and_deterministic() {
@@ -795,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_parallel_runs_merge_atomically_into_the_opened_checkout() {
+    fn full_loop_shares_context_reviews_approvals_merges_cleans_and_reloads() {
         let root = tempfile::tempdir().unwrap();
         let repository = root.path().join("repository");
         fs::create_dir(&repository).unwrap();
@@ -841,51 +973,172 @@ mod tests {
         let connection = database.connect().unwrap();
         connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project',?1,'now','now')", [repository.to_string_lossy()]).unwrap();
         connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')", []).unwrap();
-        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Parallel change','review',?1,?2,'now','now')", params![branch, base]).unwrap();
-        for (index, file) in ["frontend.txt", "backend.txt"].iter().enumerate() {
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Parallel change','working',?1,?2,'now','now')", params![branch, base]).unwrap();
+        let files = ["src/auth.ts", "tests/auth.test.ts"];
+        let mut worktrees = Vec::new();
+        for (index, file) in files.iter().enumerate() {
             let run_id = format!("run-{index}");
             let worktree = root.path().join(format!("worktree-{index}"));
             git.create_worktree(&repository, &base, &worktree).unwrap();
+            fs::create_dir_all(worktree.join(Path::new(file).parent().unwrap())).unwrap();
             fs::write(worktree.join(file), file).unwrap();
-            connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,assignment_title,status,merge_order,context_sha256,created_at,updated_at) VALUES(?1,'task','provider','Implement','executor',?2,'succeeded',?3,?4,'now','now')", params![run_id, file, index as i64, format!("context-{index}")]).unwrap();
+            connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,role,assignment_title,status,merge_order,context_sha256,created_at,updated_at) VALUES(?1,'task','provider','Implement','executor',?2,'running',?3,?4,'now','now')", params![run_id, file, index as i64, format!("context-{index}")]).unwrap();
             connection.execute("INSERT INTO worktrees(id,agent_run_id,path,base_branch,base_revision,state,created_at) VALUES(?1,?2,?3,?4,?5,'active','now')", params![format!("worktree-row-{index}"), run_id, worktree.to_string_lossy(), branch, base]).unwrap();
+            worktrees.push(worktree);
         }
 
-        let pending = get_or_create("task", &database, &paths, &git).unwrap();
-        assert_eq!(pending.runs.len(), 2);
-        let approved = decide(
-            ReviewDecisionInput {
-                attempt_id: pending.id.clone(),
-                fingerprint: pending.fingerprint.clone(),
-                feedback: String::new(),
-            },
-            "approved",
-            &database,
-            &git,
+        let share_log = root.path().join("share.log");
+        let processes = ProcessSupervisor::default();
+        processes
+            .launch(
+                "run-1".into(),
+                ProcessSpec {
+                    executable: "/bin/sh".into(),
+                    arguments: vec!["-c".into(), "cat >/dev/null".into()],
+                    cwd: worktrees[1].clone(),
+                    environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
+                    log_path: share_log,
+                    stdin: None,
+                    redactions: vec![],
+                },
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+        let runs = RunService::new(
+            database.clone(),
+            paths.clone(),
+            git.clone(),
+            ContextDrafts::default(),
+            processes.clone(),
+            PortLeases::default(),
+            Arc::new(MemorySecretStore::default()),
+        );
+        let app = crate::app::configure(tauri::test::mock_builder())
+            .manage(database.clone())
+            .manage(paths.clone())
+            .manage(git.clone())
+            .manage(processes.clone())
+            .manage(runs)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let share = invoke(
+            &webview,
+            "context_share_preview",
+            serde_json::json!({
+                "sourceRunId": null,
+                "targetRunId": "run-1",
+                "kind": "summary",
+                "contentReference": null,
+                "summary": "Use the shared authentication contract"
+            }),
+        );
+        let delivered = invoke(
+            &webview,
+            "context_share_deliver",
+            serde_json::json!({
+                "sourceRunId": null,
+                "targetRunId": "run-1",
+                "kind": "summary",
+                "contentReference": null,
+                "content": share["content"],
+                "previewSha256": share["sha256"]
+            }),
+        );
+        assert_eq!(delivered["deliveryStatus"], "delivered");
+        processes.stop("run-1").unwrap();
+
+        let denied = invoke(
+            &webview,
+            "workspace_request_action",
+            serde_json::json!({
+                "runId": "run-0",
+                "action": "create_branch",
+                "arguments": {"name":"unsafe"}
+            }),
+        );
+        assert_eq!(
+            invoke(
+                &webview,
+                "workspace_decide_action",
+                serde_json::json!({"requestId":denied["id"],"decision":"denied"})
+            )["status"],
+            "denied"
+        );
+        let approved_branch = invoke(
+            &webview,
+            "workspace_request_action",
+            serde_json::json!({
+                "runId": "run-0",
+                "action": "create_branch",
+                "arguments": {"name":"approved/safe"}
+            }),
+        );
+        assert_eq!(
+            invoke(
+                &webview,
+                "workspace_decide_action",
+                serde_json::json!({"requestId":approved_branch["id"],"decision":"approved"})
+            )["executionStatus"],
+            "succeeded"
+        );
+        connection.execute("UPDATE agent_runs SET status='succeeded',ended_at='now',updated_at='now' WHERE task_id='task'", []).unwrap();
+        connection
+            .execute(
+                "UPDATE tasks SET status='review',updated_at='now' WHERE id='task'",
+                [],
+            )
+            .unwrap();
+
+        let pending = invoke(&webview, "review_get", serde_json::json!({"taskId":"task"}));
+        assert_eq!(pending["runs"].as_array().unwrap().len(), 2);
+        assert!(
+            pending["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag["category"] == "related_file")
+        );
+        let approved = invoke(
+            &webview,
+            "review_approve",
+            serde_json::json!({
+                "attemptId":pending["id"],
+                "fingerprint":pending["fingerprint"],
+                "feedback":""
+            }),
+        );
+        for worktree in &worktrees {
+            git.remove_worktree(&repository, worktree).unwrap();
+        }
+        let revision = invoke(
+            &webview,
+            "review_merge",
+            serde_json::json!({
+                "attemptId":approved["id"],
+                "fingerprint":approved["fingerprint"]
+            }),
         )
-        .unwrap();
-        let revision = merge(
-            MergeInput {
-                attempt_id: approved.id,
-                fingerprint: approved.fingerprint,
-            },
-            &database,
-            &paths,
-            &git,
-        )
-        .unwrap();
+        .as_str()
+        .unwrap()
+        .to_string();
+        let archived_review = invoke(&webview, "review_get", serde_json::json!({"taskId":"task"}));
+        assert_eq!(archived_review["id"], approved["id"]);
+        assert_eq!(archived_review["combinedPatch"], pending["combinedPatch"]);
 
         assert_eq!(
             git.status(&repository).unwrap().revision.as_deref(),
             Some(revision.as_str())
         );
         assert_eq!(
-            fs::read_to_string(repository.join("frontend.txt")).unwrap(),
-            "frontend.txt"
+            fs::read_to_string(repository.join(files[0])).unwrap(),
+            files[0]
         );
         assert_eq!(
-            fs::read_to_string(repository.join("backend.txt")).unwrap(),
-            "backend.txt"
+            fs::read_to_string(repository.join(files[1])).unwrap(),
+            files[1]
         );
         assert_eq!(
             tasks::get(&database, "task").unwrap().unwrap().status,
@@ -899,5 +1152,27 @@ mod tests {
                 .unwrap(),
             2
         );
+        assert!(worktrees.iter().all(|worktree| !worktree.exists()));
+        assert_eq!(database.connect().unwrap().query_row::<i64, _, _>("SELECT COUNT(*) FROM worktrees WHERE state='merged' AND cleaned_at IS NOT NULL", [], |row| row.get(0)).unwrap(), 2);
+        drop(webview);
+        drop(app);
+        drop(connection);
+        drop(database);
+        let reopened = Database::initialize(&paths.data_dir.join("db.sqlite3")).unwrap();
+        let relaunched = crate::app::configure(tauri::test::mock_builder())
+            .manage(reopened.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let relaunched_webview =
+            tauri::WebviewWindowBuilder::new(&relaunched, "main", Default::default())
+                .build()
+                .unwrap();
+        let archived = invoke(
+            &relaunched_webview,
+            "tasks_list_archived",
+            serde_json::json!({"projectId":"project"}),
+        );
+        assert_eq!(archived["items"][0]["status"], "archived");
+        assert!(reopened.connect().unwrap().query_row::<i64, _, _>("SELECT COUNT(*) FROM timeline_events WHERE project_id='project' AND event_type IN('context.shared','approval.denied','approval.approved','merge.succeeded')", [], |row| row.get(0)).unwrap() >= 4);
     }
 }

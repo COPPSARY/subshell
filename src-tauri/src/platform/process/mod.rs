@@ -3,6 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::PathBuf,
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -22,6 +23,7 @@ pub struct ProcessSpec {
     pub environment: Vec<(String, String)>,
     pub log_path: PathBuf,
     pub stdin: Option<Vec<u8>>,
+    pub redactions: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -35,6 +37,16 @@ struct Handle {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    process_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessUsage {
+    pub active: bool,
+    pub process_id: Option<u32>,
+    pub cpu_percent: Option<f32>,
+    pub resident_bytes: Option<u64>,
 }
 
 #[derive(Clone, Default)]
@@ -43,6 +55,76 @@ pub struct ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
+    pub fn identity_is_active(identity: &str) -> bool {
+        let Ok(process_id) = identity.parse::<u32>() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            Command::new("kill")
+                .args(["-0", &process_id.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+        #[cfg(windows)]
+        {
+            Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {process_id}"), "/NH"])
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout)
+                            .split_whitespace()
+                            .any(|field| field == process_id.to_string())
+                })
+        }
+    }
+
+    pub fn usage(&self, run_id: &str) -> ProcessUsage {
+        let process_id = self
+            .handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(run_id)
+            .and_then(|handle| handle.process_id);
+        let Some(process_id) = process_id else {
+            return ProcessUsage {
+                active: false,
+                process_id: None,
+                cpu_percent: None,
+                resident_bytes: None,
+            };
+        };
+        let metrics = Command::new("ps")
+            .args(["-o", "%cpu=,rss=", "-p", &process_id.to_string()])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|output| {
+                let mut fields = output.split_whitespace();
+                Some((
+                    fields.next()?.parse().ok(),
+                    fields.next()?.parse::<u64>().ok().map(|value| value * 1024),
+                ))
+            });
+        ProcessUsage {
+            active: true,
+            process_id: Some(process_id),
+            cpu_percent: metrics.as_ref().and_then(|metrics| metrics.0),
+            resident_bytes: metrics.and_then(|metrics| metrics.1),
+        }
+    }
+
+    pub fn is_active(&self, run_id: &str) -> bool {
+        self.handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(run_id)
+    }
+
     pub fn launch(
         &self,
         run_id: String,
@@ -93,24 +175,40 @@ impl ProcessSupervisor {
                     master: pair.master,
                     writer,
                     killer,
+                    process_id,
                 },
             );
         let cursor = Arc::new(AtomicU64::new(initial_cursor));
         let read_sink = sink.clone();
         let read_log = log.clone();
         let read_cursor = cursor.clone();
+        let mut redactor = Redactor::new(spec.redactions);
         let reader_thread = thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             while let Ok(count) = reader.read(&mut buffer) {
                 if count == 0 {
                     break;
                 }
-                let bytes = buffer[..count].to_vec();
+                let bytes = redactor.push(&buffer[..count], false);
+                if bytes.is_empty() {
+                    continue;
+                }
                 if let Ok(mut file) = read_log.lock() {
                     let _ = file.write_all(&bytes);
                     let _ = file.flush();
                 }
-                let end = read_cursor.fetch_add(count as u64, Ordering::SeqCst) + count as u64;
+                let end = read_cursor.fetch_add(bytes.len() as u64, Ordering::SeqCst)
+                    + bytes.len() as u64;
+                read_sink(ProcessNotice::Output { bytes, cursor: end });
+            }
+            let bytes = redactor.push(&[], true);
+            if !bytes.is_empty() {
+                if let Ok(mut file) = read_log.lock() {
+                    let _ = file.write_all(&bytes);
+                    let _ = file.flush();
+                }
+                let end = read_cursor.fetch_add(bytes.len() as u64, Ordering::SeqCst)
+                    + bytes.len() as u64;
                 read_sink(ProcessNotice::Output { bytes, cursor: end });
             }
         });
@@ -167,6 +265,55 @@ impl ProcessSupervisor {
     }
 }
 
+struct Redactor {
+    patterns: Vec<Vec<u8>>,
+    pending: Vec<u8>,
+}
+
+impl Redactor {
+    fn new(patterns: Vec<Vec<u8>>) -> Self {
+        Self {
+            patterns: patterns
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect(),
+            pending: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], finish: bool) -> Vec<u8> {
+        if self.patterns.is_empty() {
+            return bytes.to_vec();
+        }
+        self.pending.extend_from_slice(bytes);
+        let mut output = Vec::new();
+        let mut index = 0;
+        while index < self.pending.len() {
+            if let Some(pattern) = self
+                .patterns
+                .iter()
+                .find(|pattern| self.pending[index..].starts_with(pattern))
+            {
+                output.extend_from_slice(b"[REDACTED]");
+                index += pattern.len();
+                continue;
+            }
+            if !finish
+                && self.patterns.iter().any(|pattern| {
+                    pattern.starts_with(&self.pending[index..])
+                        && self.pending.len() - index < pattern.len()
+                })
+            {
+                break;
+            }
+            output.push(self.pending[index]);
+            index += 1;
+        }
+        self.pending.drain(..index);
+        output
+    }
+}
+
 pub fn read_log(
     path: &std::path::Path,
     cursor: u64,
@@ -212,6 +359,14 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_the_current_process_identity() {
+        assert!(ProcessSupervisor::identity_is_active(
+            &std::process::id().to_string()
+        ));
+        assert!(!ProcessSupervisor::identity_is_active("not-a-pid"));
+    }
+
+    #[test]
     fn streams_logs_and_reaps_a_stand_in() {
         let dir = tempdir().unwrap();
         let script = dir.path().join("agent");
@@ -234,6 +389,7 @@ mod tests {
                     environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
                     log_path: log.clone(),
                     stdin: None,
+                    redactions: vec![],
                 },
                 Arc::new(move |event| {
                     tx.send(event).unwrap();
@@ -278,6 +434,7 @@ mod tests {
                         environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
                         log_path: log.clone(),
                         stdin: None,
+                        redactions: vec![],
                     },
                     Arc::new(move |event| {
                         tx.send(event).unwrap();
@@ -290,5 +447,13 @@ mod tests {
             ) {}
         }
         assert_eq!(fs::read_to_string(log).unwrap().matches("turn").count(), 2);
+    }
+
+    #[test]
+    fn redacts_secrets_split_across_output_chunks() {
+        let mut redactor = Redactor::new(vec![b"secret-marker".to_vec()]);
+        assert_eq!(redactor.push(b"before secret-", false), b"before ");
+        assert_eq!(redactor.push(b"marker after", false), b"[REDACTED] after");
+        assert!(redactor.push(&[], true).is_empty());
     }
 }

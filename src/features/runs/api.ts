@@ -1,7 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { Run, RunDiff, RunEvent, TaskPlan } from "./model";
+import type { ProcessUsage, Run, RunDiff, RunEvent, TaskPlan } from "./model";
 
-export type RunAssignment = { providerId: string; instruction: string; role?: string; title?: string; contextToken: string; approvedContext: string; environmentFiles: string[] };
+export type RunAssignment = { providerId: string; instruction: string; role?: string; title?: string; contextToken: string; approvedContext: string; environmentFiles: string[]; unitLimit?: number | null };
 export function startRuns(taskId: string, assignments: RunAssignment[], onEvent: (event: RunEvent) => void) {
   const channel = new Channel<RunEvent>(onEvent);
   return invoke<Run[]>("runs_start", { input: { taskId, assignments }, onEvent: channel });
@@ -10,6 +10,10 @@ export const enqueueRuns = (taskId: string, assignments: RunAssignment[]) => inv
 export function resumeRun(runId: string, onEvent: (event: RunEvent) => void) {
   const channel = new Channel<RunEvent>(onEvent);
   return invoke<Run>("runs_resume", { input: { runId }, onEvent: channel });
+}
+export function retryRun(runId: string, onEvent: (event: RunEvent) => void) {
+  const channel = new Channel<RunEvent>(onEvent);
+  return invoke<Run>("runs_retry", { input: { runId }, onEvent: channel });
 }
 export const listRuns = (taskId: string) => invoke<{ items: Run[] }>("runs_list", { input: { taskId } }).then((page) => page.items);
 export const getTaskPlan = (taskId: string) => invoke<TaskPlan | null>("runs_plan_get", { input: { taskId } });
@@ -25,4 +29,6 @@ export const resizeRun = (runId: string, rows: number, cols: number) => invoke<v
 export const stopRun = (runId: string) => invoke<void>("runs_stop", { input: { runId } });
 export const completeRun = (runId: string) => invoke<Run>("runs_mark_complete", { input: { runId } });
 export const readRunDiff = (runId: string) => invoke<RunDiff>("runs_diff", { input: { runId } });
+export const getRunResources = (runId: string) => invoke<ProcessUsage>("runs_resources", { input: { runId } });
 export const previewRunEnvironment = (projectId: string, files: string[]) => invoke<{ files: string[]; port: null }>("runs_environment_preview", { input: { projectId, files } });
+export const decideQuit = (decision: "preserve" | "stop" | "cancel") => invoke<void>("runs_decide_quit", { input: { decision } });
