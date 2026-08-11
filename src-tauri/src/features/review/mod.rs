@@ -101,6 +101,11 @@ struct CapturedRun {
     patch: Vec<u8>,
 }
 
+pub(crate) struct VerifiedReview {
+    pub review: Review,
+    pub project_path: PathBuf,
+}
+
 #[tauri::command]
 pub fn review_get(
     input: TaskInput,
@@ -145,7 +150,7 @@ pub fn review_merge(
     merge(input, &database, &paths, &git)
 }
 
-fn get_or_create(
+pub(crate) fn get_or_create(
     task_id: &str,
     database: &Database,
     paths: &RuntimePaths,
@@ -349,6 +354,34 @@ fn merge(
         )?;
     }
     result
+}
+
+pub(crate) fn verified_review(
+    attempt_id: &str,
+    expected_fingerprint: &str,
+    database: &Database,
+    git: &GitService,
+) -> Result<VerifiedReview, CommandError> {
+    let review = review_by_id(database, attempt_id)?;
+    if review.fingerprint != expected_fingerprint {
+        return Err(CommandError::new(
+            "review_fingerprint_mismatch",
+            "The visible review is not the requested preview",
+        ));
+    }
+    let task = reviewable_task(database, &review.task_id)?;
+    let evidence = validation_evidence(database, &task.id)?;
+    let current = capture_runs(database, git, &task)?;
+    if fingerprint(&task.base_revision, &current, &evidence)? != review.fingerprint {
+        return Err(CommandError::new(
+            "review_stale",
+            "Agent changes changed after this review was assembled",
+        ));
+    }
+    Ok(VerifiedReview {
+        project_path: project_path(database, &task.project_id)?,
+        review,
+    })
 }
 
 fn perform_merge(

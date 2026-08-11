@@ -3,6 +3,7 @@ pub mod attention;
 pub mod context;
 pub mod context_sharing;
 pub mod health;
+pub mod preview;
 pub mod projects;
 pub mod providers;
 pub mod review;

@@ -231,6 +231,9 @@ fn update_status(database: &Database, id: &str, status: &str) -> Result<Task, Co
             serde_json::json!({ "from": current, "to": status }),
         )?;
     }
+    if current == "archived" && status == "task" {
+        rollup_in_transaction(&transaction, id)?;
+    }
     transaction.commit()?;
     get(database, id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found after update"))
@@ -271,8 +274,9 @@ pub(crate) fn rollup_in_transaction(
         [task_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let mut statement =
-        connection.prepare("SELECT status FROM agent_runs WHERE task_id=?1 ORDER BY created_at")?;
+    let mut statement = connection.prepare(
+        "SELECT status FROM agent_runs WHERE task_id=?1 AND role<>'planner' ORDER BY created_at",
+    )?;
     let statuses = statement
         .query_map([task_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -457,5 +461,21 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn restoring_completed_runs_returns_the_task_to_review() {
+        let root = tempdir().unwrap();
+        let db = Database::initialize(&root.path().join("db")).unwrap();
+        let connection = db.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/project','now','now')", []).unwrap();
+        connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at,archived_at) VALUES('task','project','Restored work','archived','main','base','now','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,role,created_at,updated_at) VALUES('run','task','provider','Done','succeeded','executor','now','now')", []).unwrap();
+
+        let restored = update_status(&db, "task", "task").unwrap();
+
+        assert_eq!(restored.status, "review");
+        assert!(list(&db, "project", true).unwrap().is_empty());
     }
 }

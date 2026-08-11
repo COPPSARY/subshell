@@ -6,7 +6,9 @@ use crate::{
     features::{
         agent_api, attention,
         context::{self, ContextDrafts},
-        context_sharing, health, projects, providers, review,
+        context_sharing, health,
+        preview::{self, PreviewService},
+        projects, providers, review,
         runs::{self, RunService},
         tasks, timeline,
     },
@@ -29,6 +31,13 @@ pub fn run() {
             let drafts = ContextDrafts::default();
             let processes = ProcessSupervisor::default();
             let ports = PortLeases::default();
+            let preview_service = PreviewService::new(
+                database.clone(),
+                paths.clone(),
+                git.clone(),
+                processes.clone(),
+                ports.clone(),
+            );
             let run_service = RunService::new(
                 database.clone(),
                 paths.clone(),
@@ -41,6 +50,7 @@ pub fn run() {
                 .recover_and_dispatch()
                 .map_err(|error| std::io::Error::other(error.message))?;
             app.manage(run_service);
+            app.manage(preview_service);
             app.manage(database);
             app.manage(paths);
             app.manage(git);
@@ -60,6 +70,13 @@ pub fn run() {
             providers::providers_remove,
             providers::providers_list,
             providers::providers_detect,
+            preview::preview_prepare,
+            preview::preview_get,
+            preview::preview_start,
+            preview::preview_stop,
+            preview::preview_restart,
+            preview::preview_close,
+            preview::preview_read_log,
             review::review_get,
             review::review_approve,
             review::review_send_back,

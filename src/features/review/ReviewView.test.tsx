@@ -25,3 +25,11 @@ it("shows exact combined evidence and approves its fingerprint", async () => {
   await waitFor(() => expect(approveReview).toHaveBeenCalledWith("attempt", "fingerprint123456"));
   expect(await screen.findByRole("button", { name: "Merge locally" })).toBeTruthy();
 });
+
+it("shows structured backend errors instead of object coercion", async () => {
+  vi.mocked(getReview).mockRejectedValueOnce({ code: "task_not_reviewable", message: "Task must be ready for review" });
+
+  render(<ReviewView taskId="restored-task" />);
+
+  expect((await screen.findByRole("alert")).textContent).toBe("Task must be ready for review");
+});

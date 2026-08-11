@@ -333,12 +333,29 @@ impl GitService {
         self.create_worktree(repository, expected_target, destination)?;
         for revision in commits {
             if let Err(error) = git_command(destination, ["cherry-pick", revision], None) {
+                let files = git(destination, ["diff", "--name-only", "--diff-filter=U"])
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
                 let _ = git_command(destination, ["cherry-pick", "--abort"], None);
                 let _ = self.remove_worktree(repository, destination);
-                return Err(CommandError::new("merge_conflict", error.message));
+                let mut conflict = CommandError::new("merge_conflict", error.message);
+                conflict.details = Some(serde_json::json!({ "files": files }));
+                return Err(conflict);
             }
         }
         git(destination, ["rev-parse", "HEAD"])
+    }
+
+    pub fn remove_branch(&self, repository: &Path, branch_name: &str) -> Result<(), CommandError> {
+        validate_branch_name(repository, branch_name)?;
+        git_command(
+            repository,
+            ["update-ref", "-d", &format!("refs/heads/{branch_name}")],
+            None,
+        )?;
+        Ok(())
     }
 
     pub fn publish_integration(
@@ -812,6 +829,10 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, "merge_conflict");
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "files": ["README.md"] }))
+        );
         assert_eq!(
             service.status(repo.path()).unwrap().revision.as_deref(),
             Some(base.as_str())
