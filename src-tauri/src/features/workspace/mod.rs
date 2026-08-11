@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
@@ -483,7 +483,13 @@ fn save_template(
     if input.id.is_empty() {
         input.id = Uuid::new_v4().to_string();
     }
-    database.connect()?.execute("INSERT INTO agent_templates(id,project_id,name,provider_account_id,role,instruction,environment_files_json,unit_limit,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider_account_id=excluded.provider_account_id,role=excluded.role,instruction=excluded.instruction,environment_files_json=excluded.environment_files_json,unit_limit=excluded.unit_limit,updated_at=excluded.updated_at WHERE project_id=excluded.project_id", params![input.id,input.project_id,name,input.provider_id,input.role,input.instruction,json(&input.environment_files)?,limit_i64(input.unit_limit)?])?;
+    let changed = database.connect()?.execute("INSERT INTO agent_templates(id,project_id,name,provider_account_id,role,instruction,environment_files_json,unit_limit,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider_account_id=excluded.provider_account_id,role=excluded.role,instruction=excluded.instruction,environment_files_json=excluded.environment_files_json,unit_limit=excluded.unit_limit,updated_at=excluded.updated_at WHERE project_id=excluded.project_id", params![input.id,input.project_id,name,input.provider_id,input.role,input.instruction,json(&input.environment_files)?,limit_i64(input.unit_limit)?])?;
+    if changed == 0 {
+        return Err(CommandError::new(
+            "project_mismatch",
+            "Agent template belongs to another Project",
+        ));
+    }
     get_template(database, &input.id)
 }
 fn list_templates(
@@ -537,7 +543,13 @@ fn save_profile(
     if input.id.is_empty() {
         input.id = Uuid::new_v4().to_string();
     }
-    database.connect()?.execute("INSERT INTO environment_profiles(id,project_id,name,environment_files_json,validation_commands_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(id) DO UPDATE SET name=excluded.name,environment_files_json=excluded.environment_files_json,validation_commands_json=excluded.validation_commands_json,updated_at=excluded.updated_at WHERE project_id=excluded.project_id",params![input.id,input.project_id,name,json(&input.environment_files)?,json(&input.validation_commands)?])?;
+    let changed = database.connect()?.execute("INSERT INTO environment_profiles(id,project_id,name,environment_files_json,validation_commands_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(id) DO UPDATE SET name=excluded.name,environment_files_json=excluded.environment_files_json,validation_commands_json=excluded.validation_commands_json,updated_at=excluded.updated_at WHERE project_id=excluded.project_id",params![input.id,input.project_id,name,json(&input.environment_files)?,json(&input.validation_commands)?])?;
+    if changed == 0 {
+        return Err(CommandError::new(
+            "project_mismatch",
+            "Environment profile belongs to another Project",
+        ));
+    }
     get_profile(database, &input.id)
 }
 fn list_profiles(
@@ -591,6 +603,12 @@ fn search(
     let query = input.query.trim().to_lowercase();
     if query.len() < 2 {
         return Ok(vec![]);
+    }
+    if query.chars().count() > 200 {
+        return Err(CommandError::new(
+            "search_too_long",
+            "Search is limited to 200 characters",
+        ));
     }
     let like = format!("%{query}%");
     let project_filter = input.project_id.as_deref();
@@ -703,9 +721,14 @@ fn search(
                 && let Ok((bytes, _)) = process::read_log_tail(Path::new(&path), 64 * 1024)
             {
                 let output = String::from_utf8_lossy(&bytes);
-                if let Some(index) = output.to_lowercase().find(&query) {
-                    let start = index.saturating_sub(80);
-                    let end = (index + query.len() + 160).min(output.len());
+                let normalized = output.to_lowercase();
+                if let Some(index) = normalized.find(&query) {
+                    let start = normalized[..index].chars().count().saturating_sub(80);
+                    let detail = normalized
+                        .chars()
+                        .skip(start)
+                        .take(query.chars().count() + 160)
+                        .collect::<String>();
                     results.push(SearchResult {
                         kind: "log".into(),
                         project_id,
@@ -713,7 +736,7 @@ fn search(
                         run_id: Some(id.clone()),
                         id,
                         title,
-                        detail: output.get(start..end).unwrap_or(&output).replace('\n', " "),
+                        detail: detail.replace('\n', " "),
                     });
                 }
             }
@@ -1021,20 +1044,12 @@ fn process_merge(
     git: &GitService,
     project_id: &str,
 ) -> Result<MergeQueueItem, CommandError> {
-    let item: Option<MergeQueueItem> = {
-        let connection = database.connect()?;
-        connection.query_row("SELECT id,project_id,task_id,review_attempt_id,review_fingerprint,status,result_revision,error_message,created_at FROM merge_queue WHERE project_id=?1 AND status='queued' ORDER BY created_at LIMIT 1",[project_id],queue_row).optional()?
-    };
-    let item = item.ok_or_else(|| {
+    let item = claim_next_merge(database, project_id)?.ok_or_else(|| {
         CommandError::new(
             "merge_queue_empty",
             "No approved review is waiting to merge",
         )
     })?;
-    database.connect()?.execute(
-        "UPDATE merge_queue SET status='running' WHERE id=?1 AND status='queued'",
-        [&item.id],
-    )?;
     let result = review::merge(
         review::MergeInput {
             attempt_id: item.attempt_id.clone(),
@@ -1053,6 +1068,23 @@ fn process_merge(
         }
     }
     get_queue(database, &item.id)
+}
+
+fn claim_next_merge(
+    database: &Database,
+    project_id: &str,
+) -> Result<Option<MergeQueueItem>, CommandError> {
+    let mut connection = database.connect()?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let item = transaction.query_row("SELECT id,project_id,task_id,review_attempt_id,review_fingerprint,status,result_revision,error_message,created_at FROM merge_queue WHERE project_id=?1 AND status='queued' ORDER BY created_at,id LIMIT 1",[project_id],queue_row).optional()?;
+    if let Some(item) = &item {
+        transaction.execute(
+            "UPDATE merge_queue SET status='running' WHERE id=?1 AND status='queued'",
+            [&item.id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(item)
 }
 fn list_queue(database: &Database, project_id: &str) -> Result<Vec<MergeQueueItem>, CommandError> {
     let connection = database.connect()?;
@@ -1231,7 +1263,7 @@ mod tests {
         connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Codex','/tmp/provider','active','now','now')",[]).unwrap();
         connection.execute("INSERT INTO tasks(id,project_id,title,description,status,base_branch,base_revision,created_at,updated_at) VALUES('task','p','Fix search','Find needle','working','main','abc','now','now')",[]).unwrap();
         let log = root.path().join("agent.log");
-        fs::write(&log, "persistent needle output").unwrap();
+        fs::write(&log, format!("é{}needle output", "x".repeat(300))).unwrap();
         connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,raw_log_path,created_at,updated_at) VALUES('run','task','provider','Inspect','failed',?1,'now','now')",[log.to_string_lossy()]).unwrap();
         drop(connection);
         let template = save_template(
@@ -1249,6 +1281,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(template.name, "Reviewer");
+        let other = root.path().join("other");
+        fs::create_dir(&other).unwrap();
+        database.connect().unwrap().execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('other','Other',?1,'now','now')",[other.to_string_lossy()]).unwrap();
+        assert_eq!(
+            save_template(
+                &database,
+                AgentTemplate {
+                    project_id: "other".into(),
+                    name: "Hijack".into(),
+                    ..template.clone()
+                }
+            )
+            .unwrap_err()
+            .code,
+            "project_mismatch"
+        );
+        let profile = save_profile(
+            &database,
+            EnvironmentProfile {
+                id: String::new(),
+                project_id: "p".into(),
+                name: "Checks".into(),
+                environment_files: vec![],
+                validation_commands: vec!["true".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            save_profile(
+                &database,
+                EnvironmentProfile {
+                    project_id: "other".into(),
+                    name: "Hijack".into(),
+                    ..profile
+                }
+            )
+            .unwrap_err()
+            .code,
+            "project_mismatch"
+        );
         let results = search(
             &database,
             &GitService::default(),
@@ -1263,6 +1335,16 @@ mod tests {
                 .iter()
                 .any(|result| result.kind == "log" && result.run_id.as_deref() == Some("run"))
         );
+        assert!(
+            results
+                .iter()
+                .find(|result| result.kind == "log")
+                .unwrap()
+                .detail
+                .chars()
+                .count()
+                <= 166
+        );
         let commits = search(
             &database,
             &GitService::default(),
@@ -1273,5 +1355,22 @@ mod tests {
         )
         .unwrap();
         assert!(commits.iter().any(|result| result.kind == "commit"));
+
+        let connection = database.connect().unwrap();
+        connection.execute("INSERT INTO review_records(id,task_id,created_at,updated_at) VALUES('record','task','now','now')", []).unwrap();
+        for index in 1..=2 {
+            connection.execute("INSERT INTO review_attempts(id,review_record_id,attempt_number,base_revision,input_fingerprint,combined_diff_path,created_at) VALUES(?1,'record',?2,'abc',?3,'/tmp/diff','now')", params![format!("attempt-{index}"),index,format!("fingerprint-{index}")]).unwrap();
+            connection.execute("INSERT INTO merge_queue(id,project_id,task_id,review_attempt_id,review_fingerprint,created_at) VALUES(?1,'p','task',?2,?3,'now')",params![format!("queue-{index}"),format!("attempt-{index}"),format!("fingerprint-{index}")]).unwrap();
+        }
+        drop(connection);
+        let claims = [database.clone(), database.clone()].map(|database| {
+            std::thread::spawn(move || claim_next_merge(&database, "p").unwrap().unwrap().id)
+        });
+        let mut ids = claims
+            .into_iter()
+            .map(|claim| claim.join().unwrap())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["queue-1", "queue-2"]);
     }
 }
