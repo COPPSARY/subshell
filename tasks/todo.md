@@ -10,3 +10,15 @@
 - [x] `P4-08` Add the combined Review and planner-progress UI.
 - [x] `P4-09` Update the built-in SubShell skill and product specifications.
 - [x] `P4-10` Simplify changed code and pass the complete verification gate.
+
+# Windows Stabilization
+
+- [x] `WIN-01` Present normal Windows paths while preserving canonical backend paths.
+- [x] `WIN-02` Reuse the authenticated user Codex home for inherited profiles.
+- [x] `WIN-03` Surface structured launch/terminal errors instead of `[object Object]`.
+- [x] `WIN-04` Dispatch queued work when a prior active Run is stopped.
+- [x] `WIN-05` Reconcile live processes and recover the stuck queued/failed Run safely.
+- [x] `WIN-06` Audit remaining Windows path, shell, Git, terminal, and recovery boundaries.
+- [x] `WIN-07` Pass full frontend and Rust quality gates.
+- [x] `WIN-08` Verify open-project → prompt → terminal end-to-end on Windows.
+- [x] `WIN-09` Measure startup/bundle behavior and simplify only the changed code.

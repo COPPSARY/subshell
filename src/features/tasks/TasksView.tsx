@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Circle, CircleAlert, CircleCheck, Eye, GripVertical, ListChecks, LoaderCircle, Plus, TriangleAlert } from "lucide-react";
+import { errorMessage } from "../../shared/error";
 import type { Project } from "../projects";
 import { RunWorkspace } from "../runs";
 import { createTask, getTask, listTasks, updateTaskStatus, type CreateTaskInput } from "./api";
@@ -87,4 +88,3 @@ function TaskForm({ dirty, onCancel, onCreate }: { dirty: boolean; onCancel: () 
   return <form className="form-panel my-4" onSubmit={(event) => { event.preventDefault(); onCreate({ title, description, acceptanceCriteria: lines(criteria), allowedPaths: lines(paths), validationCommands: lines(commands), decisions: lines(decisions), confirmDirtyBase: confirm }); }}><label>Title<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label><div className="grid gap-3 lg:grid-cols-2"><label>Acceptance criteria<textarea rows={3} placeholder="One item per line" value={criteria} onChange={(event) => setCriteria(event.target.value)} /></label><label>Allowed paths<textarea rows={3} placeholder="src/features/example/**" value={paths} onChange={(event) => setPaths(event.target.value)} /></label><label>Validation commands<textarea rows={3} placeholder="npm test" value={commands} onChange={(event) => setCommands(event.target.value)} /></label><label>Decisions<textarea rows={3} placeholder="One decision per line" value={decisions} onChange={(event) => setDecisions(event.target.value)} /></label></div>{dirty && <label className="check-row"><input checked={confirm} onChange={(event) => setConfirm(event.target.checked)} required type="checkbox" />Use committed HEAD and exclude uncommitted changes</label>}<div className="flex gap-2"><button className="button-primary" type="submit">Create task</button><button className="button-secondary" onClick={onCancel} type="button">Cancel</button></div></form>;
 }
 function lines(value: string) { return value.split("\n").map((line) => line.trim()).filter(Boolean); }
-function errorMessage(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : String(error); }

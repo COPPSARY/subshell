@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, CircleStop, CircleX, Clock3, FileDiff, ListTodo, Plus, Play, X } from "lucide-react";
+import { errorMessage } from "../../shared/error";
 import { listContextSources, previewContext, type ContextPreview } from "../context";
 import { createProvider, detectProviders, listProviders, type GenericProfile } from "../providers";
 import { ProviderIcon } from "../providers/ProviderIcon";
@@ -60,13 +61,13 @@ export function RunWorkspace({ project, task, autoStart = false, initialRunId, o
         return startRuns(task.id, [{ providerId: provider.id, instruction, role: "planner", title: "Plan the goal", contextToken: context.token, approvedContext: context.content, environmentFiles: [] }], event);
       })
       .then((started) => { const runId = started[0]?.id ?? ""; setRuns(started); setActiveRunId(runId); if (runId) onActiveRunChange?.(runId); })
-      .catch((reason) => setError(String(reason)))
+      .catch((reason) => setError(errorMessage(reason)))
       .finally(() => { setAutoLaunching(false); onAutoStartConsumed?.(); });
   }, [autoStart, providersLoaded, providers, task.id]);
 
   function update(index: number, values: Partial<Draft>) { setDrafts((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, ...values } : item)); }
-  async function preview(index: number) { const item = drafts[index]; try { update(index, { preview: await previewContext({ taskId: task.id, instruction: item.instruction, selectedFiles: item.selectedFiles, pattern: item.pattern || null }) }); } catch (reason) { setError(String(reason)); } }
-  async function previewEnvironment(index: number) { try { const result = await previewRunEnvironment(project.id, lines(drafts[index].environmentFiles)); update(index, { environmentPreview: result.files }); } catch (reason) { setError(String(reason)); } }
+  async function preview(index: number) { const item = drafts[index]; try { update(index, { preview: await previewContext({ taskId: task.id, instruction: item.instruction, selectedFiles: item.selectedFiles, pattern: item.pattern || null }) }); } catch (reason) { setError(errorMessage(reason)); } }
+  async function previewEnvironment(index: number) { try { const result = await previewRunEnvironment(project.id, lines(drafts[index].environmentFiles)); update(index, { environmentPreview: result.files }); } catch (reason) { setError(errorMessage(reason)); } }
   function event(event: RunEvent) {
     if (event.type === "output") outputListeners.current.get(event.runId)?.({ bytes: event.bytes, cursor: event.cursor });
     else if (event.type === "statusChanged") {
@@ -78,10 +79,10 @@ export function RunWorkspace({ project, task, autoStart = false, initialRunId, o
       });
     } else if (event.type === "failed") setError(event.error.message);
   }
-  async function start(queued = false) { const incomplete = drafts.some((item) => !item.providerId || !item.preview || item.environmentPreview === null); if (incomplete) { setError("Choose a provider and preview context and environment files for every assignment."); return; } setError(""); try { const assignments = drafts.map((item) => ({ providerId: item.providerId, instruction: item.instruction, role: item.role, contextToken: item.preview!.token, approvedContext: item.preview!.content, environmentFiles: lines(item.environmentFiles), unitLimit: item.unitLimit })); const started = queued ? await enqueueRuns(task.id, assignments) : await startRuns(task.id, assignments, event); const runId = queued ? "" : started[0]?.id ?? ""; setRuns(started); setActiveRunId(runId); onActiveRunChange?.(runId || null); setBuilderOpen(false); } catch (reason) { setError(String(reason)); } }
+  async function start(queued = false) { const incomplete = drafts.some((item) => !item.providerId || !item.preview || item.environmentPreview === null); if (incomplete) { setError("Choose a provider and preview context and environment files for every assignment."); return; } setError(""); try { const assignments = drafts.map((item) => ({ providerId: item.providerId, instruction: item.instruction, role: item.role, contextToken: item.preview!.token, approvedContext: item.preview!.content, environmentFiles: lines(item.environmentFiles), unitLimit: item.unitLimit })); const started = queued ? await enqueueRuns(task.id, assignments) : await startRuns(task.id, assignments, event); const runId = queued ? "" : started[0]?.id ?? ""; setRuns(started); setActiveRunId(runId); onActiveRunChange?.(runId || null); setBuilderOpen(false); } catch (reason) { setError(errorMessage(reason)); } }
   async function stop(runId: string) { await stopRun(runId); setRuns((items) => items.map((run) => run.id === runId ? { ...run, status: "cancelled" } : run)); }
   async function complete(runId: string) { setError(""); try { await completeRun(runId); const next = await listRuns(task.id); setRuns(next); const unfinished = next.find((run) => run.role !== "planner" && run.status !== "succeeded"); selectRun(unfinished?.id ?? null); } catch (reason) { setError(errorMessage(reason)); } }
-  async function resume(runId: string) { setError(""); try { const resumed = await resumeRun(runId, event); setRuns((items) => items.map((run) => run.id === runId ? resumed : run)); selectRun(runId); } catch (reason) { setError(String(reason)); } }
+  async function resume(runId: string) { setError(""); try { const resumed = await resumeRun(runId, event); setRuns((items) => items.map((run) => run.id === runId ? resumed : run)); selectRun(runId); } catch (reason) { setError(errorMessage(reason)); } }
   async function retry(runId: string) { setError(""); try { const retried = await retryRun(runId, event); setRuns((items) => [...items, retried]); selectRun(retried.id); } catch (reason) { setError(errorMessage(reason)); } }
   async function approvePlan(fullAccess: boolean) { if (!plan) return; setPlanBusy(true); setError(""); try { setPlan(await approveTaskPlan(plan.id, fullAccess, event)); const next = await listRuns(task.id); setRuns(next); const firstExecutor = next.find((run) => run.role !== "planner" && ["queued", "preparing", "running", "waiting"].includes(run.status)); selectRun(firstExecutor?.id ?? null); } catch (reason) { setError(errorMessage(reason)); } finally { setPlanBusy(false); } }
   async function rejectPlan() { if (!plan) return; setPlanBusy(true); setError(""); try { setPlan(await rejectTaskPlan(plan.id)); setRuns(await listRuns(task.id)); selectRun(null); } catch (reason) { setError(errorMessage(reason)); } finally { setPlanBusy(false); } }
@@ -117,7 +118,6 @@ export function RunWorkspace({ project, task, autoStart = false, initialRunId, o
 function lines(value: string) { return value.split("\n").map((line) => line.trim()).filter(Boolean); }
 function reviewIsReady(runs: Run[]) { const implementation = runs.filter((run) => run.role !== "planner"); return implementation.length > 0 && implementation.every((run) => run.status === "succeeded"); }
 function sessionLabel(run: Run, index: number) { return run.role === "planner" ? "Planner" : run.title || (index === 0 ? "Lead" : `Agent ${index + 1}`); }
-function errorMessage(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : String(error); }
 function SessionStatus({ status }: { status: string }) {
   if (status === "succeeded") return <span title="succeeded"><Check aria-hidden="true" className="text-complete" size={11} /><span className="sr-only">succeeded</span></span>;
   if (status === "cancelled") return <span title="stopped"><CircleStop aria-hidden="true" className="text-tertiary" size={11} /><span className="sr-only">stopped</span></span>;

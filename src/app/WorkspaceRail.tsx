@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Archive, Check, ChevronDown, ChevronRight, CircleStop, CircleX, FolderGit2, GitBranch, RotateCcw } from "lucide-react";
+import { errorMessage } from "../shared/error";
+import { displayPath } from "../shared/path";
 import type { Project } from "../features/projects";
 import { ProviderIcon } from "../features/providers";
 import { listRuns, type Run } from "../features/runs";
@@ -68,7 +70,7 @@ export function WorkspaceRail({ project, selectedRunId, selectedTaskId, onSelect
         <span className="flex items-center gap-1.5 font-mono text-[10px] text-tertiary"><span aria-hidden="true" className={`size-1.5 rounded-full ${activeAgents ? "bg-accent" : "bg-tertiary"}`} />{activeAgents ? `${activeAgents} active` : "Idle"}</span>
       </div>
 
-      {!project ? <div className="px-2 py-3"><FolderGit2 aria-hidden="true" className="mb-2 text-tertiary" size={15} /><p className="text-xs font-medium text-secondary">No project open</p><p className="mt-1 text-[11px] leading-4 text-tertiary">Open a folder to start a workspace.</p></div> : <div className="px-2 py-2"><div className="flex items-center gap-2"><FolderGit2 aria-hidden="true" className="shrink-0 text-secondary" size={14} /><span className="min-w-0 flex-1 truncate text-xs font-medium text-primary">{project.name}</span><span className="max-w-20 truncate font-mono text-[9px] text-tertiary">{project.git.branch ?? "detached"}</span></div><p className="mt-1 truncate pl-[1.375rem] font-mono text-[9px] text-tertiary">{project.path}</p></div>}
+      {!project ? <div className="px-2 py-3"><FolderGit2 aria-hidden="true" className="mb-2 text-tertiary" size={15} /><p className="text-xs font-medium text-secondary">No project open</p><p className="mt-1 text-[11px] leading-4 text-tertiary">Open a folder to start a workspace.</p></div> : <div className="px-2 py-2"><div className="flex items-center gap-2"><FolderGit2 aria-hidden="true" className="shrink-0 text-secondary" size={14} /><span className="min-w-0 flex-1 truncate text-xs font-medium text-primary">{project.name}</span><span className="max-w-20 truncate font-mono text-[9px] text-tertiary">{project.git.branch ?? "detached"}</span></div><p className="mt-1 truncate pl-[1.375rem] font-mono text-[9px] text-tertiary">{displayPath(project.path)}</p></div>}
 
       {error && <p className="px-2 py-2 text-xs text-failed" role="alert">{error}</p>}
       {project && !error && !workspaces.length ? <div className="px-2 py-4"><p className="text-xs font-medium text-secondary">No active workspaces</p><p className="mt-1 text-[11px] leading-4 text-tertiary">Start a goal or restore one from Archive.</p></div> : project && <div className="ml-3 border-l border-line/70 pl-2">
@@ -112,8 +114,4 @@ function StateIndicator({ status }: { status: string }) {
   if (status === "failed") return <span title="failed"><CircleX aria-hidden="true" className="text-failed" size={12} /><span className="sr-only">failed</span></span>;
   const color = status === "waiting" ? "bg-waiting" : ["working", "queued", "preparing", "running"].includes(status) ? "bg-accent" : "bg-tertiary";
   return <span title={status}><span aria-hidden="true" className={`block size-1.5 rounded-full ${color}`} /><span className="sr-only">{status}</span></span>;
-}
-
-function errorMessage(error: unknown) {
-  return error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
 }

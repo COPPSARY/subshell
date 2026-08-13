@@ -85,7 +85,7 @@ mod tests {
                 .iter()
                 .map(|migration| migration.version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
     }
 
@@ -115,7 +115,42 @@ mod tests {
             connection
                 .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            12
+            13
+        );
+    }
+
+    #[test]
+    fn duplicate_unused_inherited_profiles_are_soft_removed() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let migrations = embedded().unwrap();
+        apply(&mut connection, &migrations[..12]).unwrap();
+        for id in ["preferred", "duplicate"] {
+            connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES(?1,'codex','Codex',?2,'active','now','now')", rusqlite::params![id, format!("/tmp/{id}")]).unwrap();
+            connection.execute("INSERT INTO generic_provider_profiles(provider_account_id,executable_path,arguments_json,resume_arguments_json,prompt_mode,config_root_env_var,inherit_user_home) VALUES(?1,'/usr/bin/codex','[\"{prompt}\"]','[\"resume\",\"--last\"]','argument','CODEX_HOME',1)", [id]).unwrap();
+        }
+        connection.execute("INSERT INTO app_settings(key,value,updated_at) VALUES('default_provider_account_id','preferred','now')", []).unwrap();
+
+        apply(&mut connection, &migrations).unwrap();
+
+        assert!(
+            connection
+                .query_row::<Option<String>, _, _>(
+                    "SELECT removed_at FROM provider_accounts WHERE id='preferred'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            connection
+                .query_row::<Option<String>, _, _>(
+                    "SELECT removed_at FROM provider_accounts WHERE id='duplicate'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap()
+                .is_some()
         );
     }
 
@@ -156,7 +191,7 @@ mod tests {
         let mut broken = embedded().unwrap();
         apply(&mut connection, &broken).unwrap();
         broken.push(Migration {
-            version: 13,
+            version: 14,
             sql: "CREATE TABLE partial (id TEXT); THIS IS NOT SQL;",
         });
 
@@ -165,7 +200,7 @@ mod tests {
             connection
                 .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             connection
@@ -182,15 +217,15 @@ mod tests {
     #[test]
     fn rejects_a_database_newer_than_the_embedded_schema() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 13).unwrap();
+        connection.pragma_update(None, "user_version", 14).unwrap();
 
         let error = apply(&mut connection, &embedded().unwrap()).unwrap_err();
 
         assert!(matches!(
             error,
             DatabaseError::NewerSchema {
-                found: 13,
-                supported: 12
+                found: 14,
+                supported: 13
             }
         ));
     }

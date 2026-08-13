@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Bell, Bot, Check, CircleAlert, ExternalLink, GitPullRequest, ListTodo, MessageSquareText, X } from "lucide-react";
+import { errorMessage } from "../../shared/error";
 import { acknowledgeAttention, claimAttentionNotification, decideApproval, listAttention, listApprovals, type ApprovalRequest, type AttentionItem } from "../attention";
 import type { Project } from "../projects";
 import type { Task } from "../tasks";
@@ -73,7 +74,6 @@ function stage(value: string) { return value.replaceAll("_", " ").replace(/^./, 
 function actionLabel(value: string) { return value.replaceAll("_", " "); }
 function tone(status: string) { if (["failed", "cancelled"].includes(status)) return "border-failed text-failed"; if (["succeeded", "approved", "merged", "archived", "review"].includes(status)) return "border-complete text-complete"; if (status === "waiting") return "border-waiting text-waiting"; return "border-line-strong text-secondary"; }
 function time(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date); }
-function errorMessage(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : String(error); }
 function notify(items: AttentionItem[], notified: Set<string>, onOpen?: (taskId: string, runId?: string | null) => void) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   for (const item of items.filter((candidate) => !candidate.acknowledged && !notified.has(`${candidate.key}:${candidate.stateFingerprint}`))) { const fingerprint = `${item.key}:${item.stateFingerprint}`; notified.add(fingerprint); claimAttentionNotification(item.key, item.stateFingerprint).then((claimed) => { if (!claimed) return; const notification = new Notification(`SubShell · ${item.title}`, { body: item.detail, tag: item.key }); notification.onclick = () => { window.focus(); onOpen?.(item.taskId, item.runId); notification.close(); }; }).catch(() => notified.delete(fingerprint)); }

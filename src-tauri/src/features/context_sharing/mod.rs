@@ -293,7 +293,7 @@ mod tests {
         );
         assert_eq!(
             safe_file(&worktree, "inside").unwrap(),
-            worktree.join("inside")
+            worktree.join("inside").canonicalize().unwrap()
         );
     }
 

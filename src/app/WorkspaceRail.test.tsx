@@ -12,6 +12,15 @@ beforeEach(() => {
   vi.mocked(listArchivedTasks).mockResolvedValue([]);
 });
 
+it("hides Windows extended-length syntax in the workspace rail", async () => {
+  vi.mocked(listTasks).mockResolvedValue([]);
+
+  render(<WorkspaceRail onSelect={vi.fn()} project={{ id: "project-1", name: "Repo", path: "\\\\?\\C:\\Users\\test\\repo", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }} />);
+
+  expect(await screen.findByText("C:\\Users\\test\\repo")).toBeTruthy();
+  expect(screen.queryByText("\\\\?\\C:\\Users\\test\\repo")).toBeNull();
+});
+
 it("lists task workspaces and opens their agent sessions", async () => {
   const task = { id: "task-1", projectId: "project-1", title: "Fix login", description: "", status: "active", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" };
   vi.mocked(listTasks).mockResolvedValue([task]);

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, FileDiff, GitBranch, Plus, RotateCcw, Square, TerminalSquare } from "lucide-react";
+import { errorMessage } from "../../shared/error";
 import { ProviderIcon } from "../providers";
 import { readRunDiff } from "./api";
 import type { Run, RunDiff } from "./model";
@@ -70,7 +71,7 @@ function useRunDiff(run: Run, interval: number) {
   useEffect(() => {
     let mounted = true;
     setDiff(null); setError("");
-    const load = () => readRunDiff(run.id).then((result) => { if (mounted) { setDiff(result); setError(""); } }).catch((reason) => mounted && setError(String(reason)));
+    const load = () => readRunDiff(run.id).then((result) => { if (mounted) { setDiff(result); setError(""); } }).catch((reason) => mounted && setError(errorMessage(reason)));
     load();
     const timer = run.status === "running" ? window.setInterval(load, interval) : undefined;
     return () => { mounted = false; if (timer) window.clearInterval(timer); };

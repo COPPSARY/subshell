@@ -111,12 +111,21 @@ it("turns a quick goal into a context-backed run automatically", async () => {
 
 it("automatically uses an installed CLI for the first prompt", async () => {
   vi.mocked(listProviders).mockResolvedValue([]);
-  vi.mocked(detectProviders).mockResolvedValue([{ key: "codex", displayName: "Codex", executablePath: "/usr/bin/codex", arguments: ["{prompt}"], resumeArguments: ["resume", "--last"], promptMode: "argument", configRootEnvVar: "CODEX_HOME", authProbeArguments: ["login", "status"], capabilities: { nativeSkills: false, reportsUsage: false, interactiveInput: true }, isConfigured: false }]);
+  vi.mocked(detectProviders).mockResolvedValue([{ key: "codex", displayName: "Codex", executablePath: "/usr/bin/codex", arguments: ["{prompt}"], resumeArguments: ["resume", "--last"], promptMode: "argument", configRootEnvVar: "CODEX_HOME", authProbeArguments: ["login", "status"], capabilities: { nativeSkills: false, reportsUsage: false, interactiveInput: true }, isConfigured: false, isAuthenticated: false }]);
   vi.mocked(createProvider).mockResolvedValue({ id: "p2", displayName: "Codex", executablePath: "/usr/bin/codex", arguments: ["{prompt}"], promptMode: "argument", configRootEnvVar: "CODEX_HOME", configSourcePath: null, inheritUserHome: true });
   vi.mocked(startRuns).mockResolvedValue([]);
   render(<RunWorkspace autoStart project={{ id: "project", name: "Repo", path: "/tmp/repo", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }} task={{ id: "task", projectId: "project", title: "Fix", description: "Fix it", status: "task", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" }} />);
   await waitFor(() => expect(createProvider).toHaveBeenCalledWith(expect.objectContaining({ executablePath: "/usr/bin/codex", providerType: "codex", configRootEnvVar: "CODEX_HOME", inheritUserHome: true })));
   await waitFor(() => expect(startRuns).toHaveBeenCalledWith("task", [expect.objectContaining({ providerId: "p2" })], expect.any(Function)));
+});
+
+it("shows the backend message when automatic launch returns a structured error", async () => {
+  vi.mocked(startRuns).mockRejectedValueOnce({ code: "process_error", message: "Codex could not be launched", retryable: false });
+
+  render(<RunWorkspace autoStart project={{ id: "project", name: "Repo", path: "/tmp/repo", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }} task={{ id: "task", projectId: "project", title: "Fix", description: "Fix it", status: "task", baseBranch: "main", baseRevision: "abc", acceptanceCriteria: [], allowedPaths: [], validationCommands: [], decisions: [], updatedAt: "now" }} />);
+
+  expect((await screen.findByRole("alert")).textContent).toContain("Codex could not be launched");
+  expect(screen.queryByText("[object Object]")).toBeNull();
 });
 
 it("opens the session selected from the workspace rail", async () => {

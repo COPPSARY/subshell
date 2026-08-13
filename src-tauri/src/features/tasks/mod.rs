@@ -147,6 +147,7 @@ pub(crate) fn create(
         serde_json::json!({ "status": "task", "title": title }),
     )?;
     transaction.commit()?;
+    drop(connection);
     get(database, &id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found after creation"))
 }
@@ -239,6 +240,7 @@ pub(crate) fn update_status(
         rollup_in_transaction(&transaction, id)?;
     }
     transaction.commit()?;
+    drop(connection);
     get(database, id)?
         .ok_or_else(|| CommandError::new("task_not_found", "Task was not found after update"))
 }

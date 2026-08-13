@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Check, GitMerge, ListPlus, RotateCcw } from "lucide-react";
+import { errorMessage } from "../../shared/error";
 import { PreviewPanel } from "../preview";
 import { enqueueMerge } from "../workspace";
 import { approveReview, getReview, mergeReview, sendBackReview } from "./api";
@@ -56,8 +57,4 @@ export function ReviewView({ taskId, readOnly = false }: { taskId: string; readO
     <section className="mt-5"><h3 className="text-sm font-medium">{materializedPatch === null ? "Agent patches" : "Exact combined diff"}</h3><pre className="mt-2 max-h-[32rem] overflow-auto rounded-md bg-app p-4 font-mono text-[11px] leading-5 text-secondary">{(materializedPatch ?? review.combinedPatch) || "No file changes."}</pre></section>
     {review.decision === "pending" && <section className="mt-5 border-t border-line pt-5"><div className="max-w-3xl"><h3 className="text-sm font-medium text-primary">Request changes</h3><p className="mt-1 text-xs leading-5 text-tertiary">Explain what the agents should revise before you approve this result.</p><label className="mt-4 block text-xs font-medium text-secondary" htmlFor="review-feedback">Feedback</label><textarea className="mt-2 min-h-24 w-full resize-y rounded-md border border-line-strong bg-app px-3 py-2 text-sm leading-5 text-primary focus-visible:outline-line-strong" id="review-feedback" onChange={(event) => setFeedback(event.target.value)} placeholder="Describe the required changes…" rows={4} value={feedback} /><div className="mt-3 flex justify-end"><button className="button-secondary" disabled={busy || !feedback.trim()} onClick={() => act(() => sendBackReview(review.id, review.fingerprint, feedback))} type="button"><RotateCcw size={14} />Send back</button></div></div></section>}
   </div>;
-}
-
-function errorMessage(error: unknown) {
-  return error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bookmark as BookmarkIcon, Boxes, GitMerge, HardDrive, Play, Plus, RotateCcw, Search, Settings2, Trash2 } from "lucide-react";
+import { errorMessage } from "../../shared/error";
 import type { Project } from "../projects";
 import { listProviders, type GenericProfile } from "../providers";
 import { stopRun } from "../runs";
@@ -34,12 +35,12 @@ export function WorkspaceView({ project, tasks, onOpen, onOpenResult }: Props) {
       ]);
       const flat = nextAgents.flatMap((agent) => { const task = taskById.get(agent.run.taskId); return task ? [{ task, ...agent }] : []; });
       setDashboard(nextDashboard); setTemplates(nextTemplates); setProfiles(nextProfiles); setProviders(nextProviders); setBookmarks(nextBookmarks); setSnapshots(nextSnapshots); setQueue(nextQueue); setAgents(flat); setError("");
-    } catch (reason) { setError(message(reason)); }
+    } catch (reason) { setError(errorMessage(reason)); }
   }
   useEffect(() => { void load(); const timer = project ? window.setInterval(load, 5000) : undefined; return () => { if (timer) window.clearInterval(timer); }; }, [project?.id, tasks.map((task) => `${task.id}:${task.updatedAt}`).join("|")]);
 
-  async function act(action: () => Promise<unknown>) { setBusy(true); setError(""); try { await action(); await load(); } catch (reason) { setError(message(reason)); } finally { setBusy(false); } }
-  async function search(event: React.FormEvent) { event.preventDefault(); setBusy(true); try { setResults(await searchWorkspace(query)); setError(""); } catch (reason) { setError(message(reason)); } finally { setBusy(false); } }
+  async function act(action: () => Promise<unknown>) { setBusy(true); setError(""); try { await action(); await load(); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } }
+  async function search(event: React.FormEvent) { event.preventDefault(); setBusy(true); try { setResults(await searchWorkspace(query)); setError(""); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } }
   async function pin(result: WorkspaceSearchResult) { if (!project || !["task", "agent", "log", "event"].includes(result.kind)) return; const kind = result.kind === "event" ? "event" : result.runId ? "run" : "task"; await act(() => toggleBookmark(project.id, kind, kind === "event" ? result.id : kind === "run" ? result.runId! : result.taskId!, result.title)); }
   function open(result: WorkspaceSearchResult) { if (!result.taskId) return; const task = taskById.get(result.taskId); if (task) onOpen(task, result.runId); else onOpenResult?.(result.taskId, result.runId); }
   function openBookmark(bookmark: Bookmark) { if (!bookmark.taskId) return; const task = taskById.get(bookmark.taskId); if (task) onOpen(task, bookmark.runId); else onOpenResult?.(bookmark.taskId, bookmark.runId); }
@@ -99,4 +100,3 @@ function EnvironmentProfiles({ busy, onAct, profiles, projectId }: { busy: boole
 
 function lines(value: string) { return value.split("\n").map((line) => line.trim()).filter(Boolean); }
 function formatBytes(value?: number | null) { if (value == null) return "—"; return `${(value / 1024 / 1024).toFixed(1)} MiB`; }
-function message(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : String(error); }

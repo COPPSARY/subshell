@@ -308,7 +308,7 @@ pub fn runs_resize(input: ResizeInput, service: State<RunService>) -> Result<(),
 }
 #[tauri::command]
 pub fn runs_stop(input: RunId, service: State<RunService>) -> Result<(), CommandError> {
-    service.stop(&input.run_id)
+    service.stop_and_dispatch(&input.run_id, Channel::new(|_| Ok(())))
 }
 #[tauri::command]
 pub fn runs_mark_complete(input: RunId, service: State<RunService>) -> Result<Run, CommandError> {
@@ -1289,6 +1289,13 @@ impl RunService {
     }
 
     fn launch(&self, run: Prepared, channel: Channel<RunStreamEvent>) -> Result<(), CommandError> {
+        let context_path = self
+            .paths
+            .data_dir
+            .join("runs")
+            .join(&run.run_id)
+            .join("context.md");
+        let launch_prompt = run.provider.launch_prompt(&run.prompt, &context_path);
         let (executable, arguments, stdin) = if run.resume {
             run.provider.resume_command(
                 &run.config_root,
@@ -1297,7 +1304,7 @@ impl RunService {
             )?
         } else {
             run.provider.launch_command(
-                &run.prompt,
+                &launch_prompt,
                 &run.config_root,
                 run.provider_session_id.as_deref(),
                 run.full_access,
@@ -1314,6 +1321,10 @@ impl RunService {
             ("SUBSHELL_TASK_ID".into(), run.task_id.clone()),
             ("SUBSHELL_RUN_ID".into(), run.run_id.clone()),
             ("SUBSHELL_RUN_ROLE".into(), run.role.clone()),
+            (
+                "SUBSHELL_CONTEXT_PATH".into(),
+                context_path.to_string_lossy().into(),
+            ),
         ]);
         if let Ok(executable) = std::env::current_exe() {
             environment.push((
@@ -1321,8 +1332,12 @@ impl RunService {
                 executable.to_string_lossy().into(),
             ));
         }
-        if let Some(name) = &run.provider.config_root_env_var {
-            environment.push((name.clone(), run.config_root.to_string_lossy().into()));
+        if let Some(config) = provider_config_environment(
+            run.provider.config_root_env_var.as_deref(),
+            &run.config_root,
+            run.provider.inherit_user_home,
+        ) {
+            environment.push(config);
         }
         let mut redactions = Vec::new();
         if let Some(name) = run.provider.secret_environment_key()
@@ -1568,7 +1583,7 @@ impl RunService {
         }
         let mut connection = self.database.connect()?;
         let transaction = connection.transaction()?;
-        transaction.execute("UPDATE agent_runs SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND status IN('queued','preparing','running','waiting')",[id])?;
+        mark_cancelled(&transaction, id)?;
         timeline::append(
             &transaction,
             EventRefs {
@@ -1591,6 +1606,23 @@ impl RunService {
             Ok(())
         }
     }
+
+    fn stop_and_dispatch(
+        &self,
+        id: &str,
+        channel: Channel<RunStreamEvent>,
+    ) -> Result<(), CommandError> {
+        let run = self
+            .get(id)?
+            .ok_or_else(|| CommandError::new("run_not_found", "Run was not found"))?;
+        let project_id = tasks::get(&self.database, &run.task_id)?
+            .ok_or_else(|| CommandError::new("task_not_found", "Task was not found"))?
+            .project_id;
+        self.stop(id)?;
+        self.dispatch_next(&project_id, channel)?;
+        Ok(())
+    }
+
     fn mark_complete(&self, id: &str) -> Result<Run, CommandError> {
         let run = self
             .get(id)?
@@ -1926,9 +1958,6 @@ fn base_environment(home: &Path, port: u16, inherit_user_home: bool) -> Vec<(Str
                 values.push((key.into(), value));
             }
         }
-        if !values.iter().any(|(key, _)| key == "HOME") {
-            values.push(("HOME".into(), home.to_string_lossy().into()));
-        }
     } else {
         values.extend([
             ("HOME".into(), home.to_string_lossy().into()),
@@ -1941,12 +1970,62 @@ fn base_environment(home: &Path, port: u16, inherit_user_home: bool) -> Vec<(Str
     values.push(("SUBSHELL_PORT".into(), port.to_string()));
     values
 }
+
+fn provider_config_environment(
+    name: Option<&str>,
+    config_root: &Path,
+    inherit_user_home: bool,
+) -> Option<(String, String)> {
+    if inherit_user_home {
+        return None;
+    }
+
+    name.map(|name| (name.to_owned(), config_root.to_string_lossy().into_owned()))
+}
 fn io_error(error: std::io::Error) -> CommandError {
     CommandError::new("filesystem_error", error.to_string())
 }
 
 fn json_error(error: serde_json::Error) -> CommandError {
     CommandError::new("invalid_stored_data", error.to_string())
+}
+
+fn mark_cancelled(connection: &rusqlite::Connection, id: &str) -> Result<(), CommandError> {
+    connection.execute("UPDATE agent_runs SET status='cancelled',process_identity=NULL,waiting_reason=NULL,ended_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND status IN('queued','preparing','running','waiting')", [id])?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn cancelling_a_run_clears_stale_process_state() {
+        let root = tempdir().unwrap();
+        let database = Database::initialize(&root.path().join("db.sqlite3")).unwrap();
+        let mut connection = database.connect().unwrap();
+        connection.execute("INSERT INTO projects(id,name,path,created_at,updated_at) VALUES('project','Project','/tmp/project','now','now')", []).unwrap();
+        connection.execute("INSERT INTO tasks(id,project_id,title,status,base_branch,base_revision,created_at,updated_at) VALUES('task','project','Task','working','main','abc','now','now')", []).unwrap();
+        connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at) VALUES('provider','generic','Provider','/tmp/provider','active','now','now')", []).unwrap();
+        connection.execute("INSERT INTO agent_runs(id,task_id,provider_account_id,instruction,status,process_identity,waiting_reason,created_at,updated_at) VALUES('run','task','provider','Work','running','1234','Process is still running','now','now')", []).unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        mark_cancelled(&transaction, "run").unwrap();
+        transaction.commit().unwrap();
+
+        let state: (String, Option<String>, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT status,process_identity,waiting_reason,ended_at FROM agent_runs WHERE id='run'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, "cancelled");
+        assert_eq!(state.1, None);
+        assert_eq!(state.2, None);
+        assert!(state.3.is_some());
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -2055,6 +2134,24 @@ mod tests {
             base_environment(Path::new("/tmp/config"), 4100, false)
                 .iter()
                 .any(|(key, value)| key == "TERM" && !value.is_empty())
+        );
+    }
+
+    #[test]
+    fn inherited_cli_profiles_do_not_receive_a_synthetic_home() {
+        let environment = base_environment(Path::new("/tmp/run-specific-config"), 4100, true);
+        assert!(
+            !environment
+                .iter()
+                .any(|(key, value)| { key == "HOME" && value == "/tmp/run-specific-config" })
+        );
+        assert_eq!(
+            provider_config_environment(
+                Some("CODEX_HOME"),
+                Path::new("/tmp/run-specific-config"),
+                true,
+            ),
+            None
         );
     }
 
@@ -2255,7 +2352,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(queued[0].status, "queued");
-        service.stop(&runs[0].id).unwrap();
+        database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE agent_runs SET waiting_reason='stale process warning' WHERE id=?1",
+                [&runs[0].id],
+            )
+            .unwrap();
+        for _ in 0..50 {
+            if service.list(&task.id).unwrap()[1].status == "succeeded" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        service
+            .stop_and_dispatch(&runs[0].id, Channel::new(|_| Ok(())))
+            .unwrap();
         for _ in 0..50 {
             let states = service.list(&task.id).unwrap();
             if states
@@ -2268,6 +2381,7 @@ mod tests {
         }
         let states = service.list(&task.id).unwrap();
         assert_eq!(states[0].status, "cancelled");
+        assert_eq!(states[0].waiting_reason, None);
         assert_eq!(states[1].status, "succeeded");
         assert_eq!(states[1].reported_input_tokens, Some(12));
         assert_eq!(states[1].reported_output_tokens, Some(4));

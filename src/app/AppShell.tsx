@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Search } from "lucide-react";
+import { errorMessage } from "../shared/error";
 import appIconUrl from "../../assets/app-icon.svg";
 import { getHealth } from "../features/health";
 import { listProjects, ProjectsView, restoreProject, type Project } from "../features/projects";
@@ -134,5 +135,3 @@ export function AppShell() {
     </div>
   );
 }
-
-function errorMessage(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : String(error); }

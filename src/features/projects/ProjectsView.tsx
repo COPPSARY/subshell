@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { File, FolderOpen, GitBranch, Play } from "lucide-react";
+import { errorMessage } from "../../shared/error";
+import { displayPath } from "../../shared/path";
 import { getProjectStatus, listProjectFiles, listProjects, openProject } from "./api";
 import type { Project } from "./model";
 
@@ -73,7 +75,7 @@ export function ProjectsView({ selectedProject, onSelect, onStartGoal }: Props) 
     {error && <p className="error-banner" role="alert">{error}</p>}
     {loading ? <p className="empty-row" role="status">Loading projects…</p> : !selected ? <div className="grid min-h-[calc(100vh-11rem)] place-items-center"><div className="max-w-md text-center"><span className="icon-box mx-auto mb-4"><FolderOpen aria-hidden="true" size={18} /></span><h2 className="text-xl font-medium text-primary">Open your first project</h2><p className="mt-2 text-sm leading-6 text-secondary">Choose a local Git folder. Then describe the work—you do not need to create tasks, branches, or agent profiles first.</p><button className="button-primary mx-auto mt-5" onClick={chooseProject} type="button"><FolderOpen aria-hidden="true" size={14} />Choose folder</button></div></div> : <>
       <section className="pt-7">
-        <div className="flex min-w-0 items-start gap-3"><span className="icon-box"><FolderOpen size={16} /></span><div className="min-w-0 flex-1"><h2 className="truncate text-lg font-medium text-primary">{selected.name}</h2><p className="mt-1 truncate font-mono text-[11px] text-tertiary">{selected.path}</p></div><span className="flex shrink-0 items-center gap-1.5 rounded-full bg-panel px-2.5 py-1 font-mono text-[10px] text-secondary"><GitBranch size={11} />{selected.git.branch ?? "detached"}</span></div>
+        <div className="flex min-w-0 items-start gap-3"><span className="icon-box"><FolderOpen size={16} /></span><div className="min-w-0 flex-1"><h2 className="truncate text-lg font-medium text-primary">{selected.name}</h2><p className="mt-1 truncate font-mono text-[11px] text-tertiary">{displayPath(selected.path)}</p></div><span className="flex shrink-0 items-center gap-1.5 rounded-full bg-panel px-2.5 py-1 font-mono text-[10px] text-secondary"><GitBranch size={11} />{selected.git.branch ?? "detached"}</span></div>
         <div className="mt-7"><h3 className="text-base font-medium text-primary">What should your agent work on?</h3><p className="mt-1 text-sm text-secondary">Describe the outcome in plain language. Context, task setup, and an isolated worktree are automatic.</p></div>
         {selected.git.isRepository && selected.git.revision && onStartGoal ? <form className="mt-4 overflow-hidden rounded-lg border border-line-strong bg-surface text-left shadow-xl shadow-black/15 focus-within:border-[#555b66]" onSubmit={startGoal}>
           <label className="sr-only" htmlFor="project-goal">What do you want the agent to do?</label>
@@ -92,7 +94,7 @@ export function ProjectsView({ selectedProject, onSelect, onStartGoal }: Props) 
 }
 
 function message(error: unknown) {
-  const detail = typeof error === "string" ? error : error && typeof error === "object" && "message" in error ? String(error.message) : "";
+  const detail = errorMessage(error, "");
   if (detail.includes("reading 'invoke'")) return "SubShell's desktop backend is unavailable. Restart the desktop app, then try again.";
   return detail || "The project folder could not be read. Check that the folder still exists, then try again.";
 }

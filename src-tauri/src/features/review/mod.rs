@@ -849,7 +849,13 @@ mod tests {
                 cmd: command.into(),
                 callback: tauri::ipc::CallbackFn(0),
                 error: tauri::ipc::CallbackFn(1),
-                url: "tauri://localhost".parse().unwrap(),
+                url: if cfg!(any(windows, target_os = "android")) {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                }
+                .parse()
+                .unwrap(),
                 body: tauri::ipc::InvokeBody::Json(serde_json::json!({"input": input})),
                 headers: Default::default(),
                 invoke_key: tauri::test::INVOKE_KEY.into(),
@@ -989,12 +995,26 @@ mod tests {
 
         let share_log = root.path().join("share.log");
         let processes = ProcessSupervisor::default();
+        #[cfg(windows)]
+        let (share_executable, share_arguments) = (
+            "powershell.exe".into(),
+            vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                "while ($true) { Start-Sleep -Seconds 1 }".into(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (share_executable, share_arguments) =
+            ("/bin/sh".into(), vec!["-c".into(), "cat >/dev/null".into()]);
         processes
             .launch(
                 "run-1".into(),
                 ProcessSpec {
-                    executable: "/bin/sh".into(),
-                    arguments: vec!["-c".into(), "cat >/dev/null".into()],
+                    executable: share_executable,
+                    arguments: share_arguments,
                     cwd: worktrees[1].clone(),
                     environment: vec![("PATH".into(), std::env::var("PATH").unwrap())],
                     log_path: share_log,

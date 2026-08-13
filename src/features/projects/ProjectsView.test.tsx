@@ -27,6 +27,15 @@ it("shows files for the selected repository", async () => {
   expect(listProjectFiles).toHaveBeenCalledWith("project-1");
 });
 
+it("hides Windows extended-length syntax from the displayed project path", async () => {
+  vi.mocked(listProjects).mockResolvedValueOnce([{ id: "project-1", name: "rust-chess", path: "\\\\?\\C:\\Users\\test\\rust-chess", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: false } }]);
+
+  render(<ProjectsView />);
+
+  expect(await screen.findByText("C:\\Users\\test\\rust-chess")).toBeTruthy();
+  expect(screen.queryByText("\\\\?\\C:\\Users\\test\\rust-chess")).toBeNull();
+});
+
 it("starts from committed HEAD without blocking on a dirty checkout", async () => {
   vi.mocked(listProjects).mockResolvedValueOnce([{ id: "project-1", name: "subshell", path: "/tmp/subshell", lastOpenedAt: "now", git: { isRepository: true, branch: "main", revision: "abc", dirty: true } }]);
   const start = vi.fn().mockResolvedValue(undefined);

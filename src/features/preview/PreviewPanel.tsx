@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, Play, RotateCcw, Square, Trash2 } from "lucide-react";
+import { errorMessage as baseErrorMessage } from "../../shared/error";
 import type { Review } from "../review";
 import { closePreview, getPreview, preparePreview, readPreviewLog, restartPreview, startPreview, stopPreview } from "./api";
 import type { Preview } from "./model";
@@ -104,8 +105,8 @@ export function PreviewPanel({ review, onCombinedPatch }: { review: Review; onCo
 }
 
 function errorMessage(error: unknown) {
-  if (!error || typeof error !== "object") return String(error);
-  const message = "message" in error ? String(error.message) : String(error);
+  const message = baseErrorMessage(error);
+  if (!error || typeof error !== "object") return message;
   const files = "details" in error && error.details && typeof error.details === "object" && "files" in error.details && Array.isArray(error.details.files) ? error.details.files.join(", ") : "";
   return files ? `${message}: ${files}` : message;
 }

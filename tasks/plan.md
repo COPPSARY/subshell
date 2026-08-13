@@ -77,3 +77,61 @@ Turn one plain-language goal into a planner-led Task with independently scoped A
 - Primary pain: parallel agent execution and explicit context coordination across different CLIs.
 - Desired outcome: one prompt autonomously becomes parallel work and one final human approval.
 - Authority: implementation planning and assignment are automatic; final local integration remains human-approved.
+
+---
+
+# Implementation Plan: Windows Core-Flow Stabilization
+
+## Overview
+
+Make the supported Windows x64 workflow reliable from project selection through an authenticated Codex run and interactive terminal. Preserve canonical filesystem paths internally, show normal Windows paths in the UI, keep inherited CLI authentication intact, dispatch queued work after cancellation, surface structured backend errors, and recover without duplicating provider processes.
+
+## Architecture Decisions
+
+- Keep canonical/extended paths in persistence and backend operations; normalize only at display or Windows process-command boundaries.
+- Treat `inheritUserHome` as an environment contract: inherited profiles receive the user's real home/config environment and must not receive a run-specific `CODEX_HOME`.
+- Keep the existing structured `CommandError` contract and decode it consistently at the frontend boundary.
+- A user stop is a scheduler transition: after cancellation, dispatch the next eligible task in the same project.
+- Never attach a second supervisor to a still-running provider process; preserve logs/worktrees and make recovery actionable.
+
+## Task List
+
+### Phase 1: Proven failures
+
+- [x] Hide Windows `\\?\` syntax in project-path presentation without mutating stored paths.
+- [x] Preserve an inherited Codex home/login when launching a Run.
+- [x] Render structured run and terminal errors instead of `[object Object]` or a blank terminal.
+- [x] Dispatch the next queued project task after an active Run is stopped.
+- [x] Reconcile the duplicate development instances and safely recover the existing stuck pawn Run.
+
+### Checkpoint: Core loop
+
+- [x] One SubShell supervisor process owns the test run.
+- [x] Existing Codex authentication is reused without another login prompt.
+- [x] Open project → submit goal → see live terminal output works on Windows.
+
+### Phase 2: Windows audit
+
+- [x] Audit project/filesystem/Git paths for extended-prefix leakage or incompatible child-process paths.
+- [x] Audit `.cmd`/`.ps1` provider launching, environment inheritance, resize/input, stop, restart, and queued recovery.
+- [x] Audit installer/build commands and Windows-only test coverage.
+
+### Checkpoint: Quality and performance
+
+- [x] Frontend tests and production web build pass (67 tests; main bundle 101.05 kB gzip).
+- [x] Rust tests compile/run, formatting passes, and Clippy has no warnings (71 tests).
+- [x] Bundle/startup measurements are recorded; Git status refresh uses one process and the project UI settled in about four seconds in the release build.
+- [x] Real runtime has a clean core flow: project open, exact prompt persisted, Codex terminal active, UI stop, and no login/trust/401/object-object error.
+
+## Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Multiple dev instances race on the same SQLite/process state | High | Use one supervisor and a unique data directory for isolated verification when necessary. |
+| Extended Windows paths break third-party CLIs | High | Convert only at the process boundary and regression-test `.cmd`/`.ps1` shims. |
+| Restart duplicates a live Codex process | High | Keep process-identity recovery conservative; never auto-launch over a verified live PID. |
+| Inherited config leaks into isolated accounts | High | Gate home/config environment behavior on `inheritUserHome` and test both modes. |
+
+## Open Questions
+
+- None required to continue: current runtime records and logs provide reproducible failures.

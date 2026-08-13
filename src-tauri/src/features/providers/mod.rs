@@ -20,7 +20,7 @@ use crate::{
         database::Database,
         environment::RuntimePaths,
         keychain::{SecretStore, SystemSecretStore},
-        process::{ProcessNotice, ProcessSpec, ProcessSupervisor},
+        process::{ProcessNotice, ProcessSpec, ProcessSupervisor, prepare_command},
     },
 };
 
@@ -61,6 +61,7 @@ pub struct DetectedProvider {
     pub auth_probe_arguments: Vec<String>,
     pub capabilities: adapters::ProviderCapabilities,
     pub is_configured: bool,
+    pub is_authenticated: bool,
 }
 
 pub struct ResolvedProvider {
@@ -76,6 +77,8 @@ pub struct ResolvedProvider {
 }
 
 impl ResolvedProvider {
+    const WINDOWS_SAFE_PROMPT_UNITS: usize = 8 * 1024;
+
     pub fn secret_environment_key(&self) -> Option<&'static str> {
         self.adapter.and_then(|adapter| adapter.secret_env_var())
     }
@@ -107,6 +110,20 @@ impl ResolvedProvider {
             arguments,
             self.prompt_mode == "stdin",
         ))
+    }
+
+    pub fn launch_prompt(&self, prompt: &str, context_path: &Path) -> String {
+        if cfg!(windows)
+            && self.adapter.is_some_and(|adapter| adapter.key() == "codex")
+            && self.prompt_mode == "argument"
+            && prompt.encode_utf16().count() > Self::WINDOWS_SAFE_PROMPT_UNITS
+        {
+            return format!(
+                "Read the complete task instructions from the UTF-8 file at {} and carry them out.",
+                context_path.display()
+            );
+        }
+        prompt.to_owned()
     }
 
     pub fn resume_command(
@@ -233,13 +250,11 @@ pub enum ProviderAuthEvent {
 
 #[tauri::command]
 pub fn providers_create_generic(
-    mut input: GenericProfile,
+    input: GenericProfile,
     database: State<Database>,
     paths: State<RuntimePaths>,
 ) -> Result<GenericProfile, CommandError> {
-    input.id = Uuid::new_v4().to_string();
-    save(&input, &database, &paths)?;
-    get(&database, &input.id)
+    create(input, &database, &paths)
 }
 #[tauri::command]
 pub fn providers_update_generic(
@@ -355,6 +370,21 @@ pub(crate) fn save(
     connection.execute("INSERT INTO provider_accounts(id,provider_type,display_name,config_scope_path,status,created_at,updated_at,removed_at) VALUES(?1,?2,?3,?4,?5,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),NULL) ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type,display_name=excluded.display_name,config_scope_path=excluded.config_scope_path,updated_at=excluded.updated_at,removed_at=NULL",params![profile.id,profile.provider_type,profile.display_name,scope,initial_status])?;
     connection.execute("INSERT INTO generic_provider_profiles(provider_account_id,executable_path,arguments_json,resume_arguments_json,prompt_mode,config_root_env_var,inherit_user_home) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(provider_account_id) DO UPDATE SET executable_path=excluded.executable_path,arguments_json=excluded.arguments_json,resume_arguments_json=excluded.resume_arguments_json,prompt_mode=excluded.prompt_mode,config_root_env_var=excluded.config_root_env_var,inherit_user_home=excluded.inherit_user_home",params![profile.id,profile.executable_path,serde_json::to_string(&profile.arguments).unwrap(),serde_json::to_string(&profile.resume_arguments).unwrap(),profile.prompt_mode,profile.config_root_env_var,profile.inherit_user_home])?;
     Ok(())
+}
+
+fn create(
+    mut profile: GenericProfile,
+    database: &Database,
+    paths: &RuntimePaths,
+) -> Result<GenericProfile, CommandError> {
+    profile.id = if profile.inherit_user_home && adapters::by_key(&profile.provider_type).is_some()
+    {
+        format!("detected-{}", profile.provider_type)
+    } else {
+        Uuid::new_v4().to_string()
+    };
+    save(&profile, database, paths)?;
+    get(database, &profile.id)
 }
 
 fn validate(profile: &GenericProfile) -> Result<(), CommandError> {
@@ -841,9 +871,11 @@ fn codex_command(
     scope: &Path,
     arguments: &[&str],
 ) -> Result<std::process::ExitStatus, CommandError> {
+    let arguments = codex_auth_arguments(arguments);
+    let (executable, arguments) = prepare_command(executable, &arguments);
     let mut command = Command::new(executable);
     command
-        .args(codex_auth_arguments(arguments))
+        .args(arguments)
         .current_dir(scope)
         .env_clear()
         .stdin(Stdio::null())
@@ -856,9 +888,11 @@ fn codex_command(
 }
 
 fn codex_login_is_valid(executable: &str, scope: &Path, environment: &[(String, String)]) -> bool {
+    let arguments = codex_auth_arguments(&["login", "status"]);
+    let (executable, arguments) = prepare_command(executable, &arguments);
     let mut command = Command::new(executable);
     command
-        .args(codex_auth_arguments(&["login", "status"]))
+        .args(arguments)
         .current_dir(scope)
         .env_clear()
         .stdin(Stdio::null())
@@ -868,6 +902,18 @@ fn codex_login_is_valid(executable: &str, scope: &Path, environment: &[(String, 
         command.env(key, value);
     }
     command.status().is_ok_and(|status| status.success())
+}
+
+fn existing_codex_login_is_valid(executable: &str) -> bool {
+    let arguments = vec!["login".into(), "status".into()];
+    let (executable, arguments) = prepare_command(executable, &arguments);
+    Command::new(executable)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn auth_process_id(account_id: &str) -> String {
@@ -889,6 +935,8 @@ fn detect(database: &Database) -> Result<Vec<DetectedProvider>, CommandError> {
         .filter_map(|adapter| {
             let executable = find_executable(adapter.executable())?;
             let executable_path = executable.to_string_lossy().into_owned();
+            let is_authenticated =
+                adapter.key() == "codex" && existing_codex_login_is_valid(&executable_path);
             Some(DetectedProvider {
                 key: adapter.key(),
                 display_name: adapter.display_name(),
@@ -914,6 +962,7 @@ fn detect(database: &Database) -> Result<Vec<DetectedProvider>, CommandError> {
                     .map(|argument| (*argument).into())
                     .collect(),
                 capabilities: adapter.capabilities(),
+                is_authenticated,
             })
         })
         .collect())
@@ -934,10 +983,6 @@ fn find_executable(name: &str) -> Option<PathBuf> {
     directories.sort();
     directories.dedup();
     for directory in directories {
-        let candidate = directory.join(name);
-        if is_executable(&candidate) {
-            return candidate.canonicalize().ok();
-        }
         #[cfg(windows)]
         for extension in env::var("PATHEXT")
             .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
@@ -945,11 +990,33 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         {
             let candidate = directory.join(format!("{name}{extension}"));
             if is_executable(&candidate) {
-                return candidate.canonicalize().ok();
+                return canonical_executable(&candidate);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let candidate = directory.join(name);
+            if is_executable(&candidate) {
+                return canonical_executable(&candidate);
             }
         }
     }
     None
+}
+
+fn canonical_executable(path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    #[cfg(windows)]
+    {
+        let value = canonical.to_string_lossy();
+        if let Some(value) = value.strip_prefix(r"\\?\UNC\") {
+            return Some(PathBuf::from(format!(r"\\{value}")));
+        }
+        if let Some(value) = value.strip_prefix(r"\\?\") {
+            return Some(PathBuf::from(value));
+        }
+    }
+    Some(canonical)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -1004,6 +1071,38 @@ mod tests {
             .launch_command("hello; touch /tmp/nope", dir.path(), None, false)
             .unwrap();
         assert_eq!(args[1], "hello; touch /tmp/nope");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn large_codex_prompts_use_the_persisted_context_file_on_windows() {
+        let resolved = ResolvedProvider {
+            id: "codex".into(),
+            executable_path: r"C:\Users\test\codex.cmd".into(),
+            arguments: vec!["{prompt}".into()],
+            resume_arguments: vec!["resume".into(), "--last".into()],
+            prompt_mode: "argument".into(),
+            config_root_env_var: Some("CODEX_HOME".into()),
+            config_source_path: None,
+            inherit_user_home: true,
+            adapter: adapters::by_key("codex"),
+        };
+
+        let prompt = resolved.launch_prompt(
+            &"x".repeat(64 * 1024),
+            Path::new(r"C:\SubShell\runs\run-id\context.md"),
+        );
+        let (_, arguments, stdin) = resolved
+            .launch_command(&prompt, Path::new(r"C:\run"), None, false)
+            .unwrap();
+
+        assert_eq!(
+            arguments,
+            [
+                r"Read the complete task instructions from the UTF-8 file at C:\SubShell\runs\run-id\context.md and carry them out."
+            ]
+        );
+        assert!(!stdin);
     }
 
     #[cfg(unix)]
@@ -1153,6 +1252,38 @@ mod tests {
             get(&database, "account").unwrap_err().code,
             "provider_not_found"
         );
+    }
+
+    #[test]
+    fn importing_a_detected_profile_is_idempotent() {
+        let root = tempdir().unwrap();
+        let database = Database::initialize(&root.path().join("db.sqlite3")).unwrap();
+        let paths = RuntimePaths {
+            data_dir: root.path().join("data"),
+        };
+        let profile = GenericProfile {
+            id: String::new(),
+            display_name: "Codex".into(),
+            provider_type: "codex".into(),
+            status: "active".into(),
+            executable_path: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            arguments: vec!["{prompt}".into()],
+            resume_arguments: vec!["resume".into(), "--last".into()],
+            prompt_mode: "argument".into(),
+            config_root_env_var: Some("CODEX_HOME".into()),
+            config_source_path: None,
+            inherit_user_home: true,
+        };
+
+        let first = create(profile.clone(), &database, &paths).unwrap();
+        let second = create(profile, &database, &paths).unwrap();
+
+        assert_eq!(first.id, "detected-codex");
+        assert_eq!(second.id, first.id);
+        assert_eq!(list(&database).unwrap().len(), 1);
     }
 
     #[test]

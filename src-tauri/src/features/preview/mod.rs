@@ -656,7 +656,7 @@ fn link_node_modules(project: &Path, worktree: &Path) -> Result<(), CommandError
     #[cfg(unix)]
     std::os::unix::fs::symlink(source, destination).map_err(io_error)?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(source, destination).map_err(io_error)?;
+    junction::create(source, destination).map_err(io_error)?;
     Ok(())
 }
 
@@ -968,6 +968,24 @@ fn io_error(error: std::io::Error) -> CommandError {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[cfg(windows)]
+    #[test]
+    fn links_node_modules_with_an_unprivileged_windows_junction() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let worktree = root.path().join("worktree");
+        fs::create_dir_all(project.join("node_modules")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(project.join("node_modules").join("fixture.txt"), "linked").unwrap();
+
+        link_node_modules(&project, &worktree).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(worktree.join("node_modules").join("fixture.txt")).unwrap(),
+            "linked"
+        );
+    }
 
     #[test]
     fn detects_vite_with_the_project_package_manager_and_exact_port() {

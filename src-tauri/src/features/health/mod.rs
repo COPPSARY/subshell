@@ -37,7 +37,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(response).unwrap(),
-            json!({ "status": "ok", "schemaVersion": 12 })
+            json!({ "status": "ok", "schemaVersion": 13 })
         );
     }
 

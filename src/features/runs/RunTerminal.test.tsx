@@ -38,6 +38,16 @@ it("keeps ended session logs read-only", async () => {
   expect(terminal.input).toBeNull();
 });
 
+it("shows structured terminal connection errors", async () => {
+  vi.mocked(readRunOutputTail).mockRejectedValue({ code: "output_unavailable", message: "Agent output is unavailable" });
+  const output = subscription();
+
+  render(<RunTerminal runId="run-1" subscribe={output.subscribe} />);
+
+  expect((await screen.findByRole("alert")).textContent).toContain("Agent output is unavailable");
+  expect(screen.queryByText("[object Object]")).toBeNull();
+});
+
 it("writes streamed output directly without a React rerender", async () => {
   vi.mocked(readRunOutputTail).mockResolvedValue({ bytes: [], nextCursor: 0 });
   const output = subscription();

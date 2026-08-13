@@ -92,8 +92,12 @@ impl GitService {
                 "Project directory does not exist",
             ));
         }
-        let inside = git(path, ["rev-parse", "--is-inside-work-tree"]);
-        if !matches!(inside.as_deref(), Ok("true")) {
+        let output = Command::new("git")
+            .args(["status", "--porcelain=v2", "--branch"])
+            .current_dir(path)
+            .output()
+            .map_err(|error| CommandError::new("git_unavailable", error.to_string()))?;
+        if !output.status.success() {
             return Ok(GitStatus {
                 is_repository: false,
                 branch: None,
@@ -101,10 +105,20 @@ impl GitService {
                 dirty: false,
             });
         }
-        let branch = git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
-        // An initialized repository has a branch but no revision until its first commit.
-        let revision = git(path, ["rev-parse", "HEAD"]).ok();
-        let dirty = !git(path, ["status", "--porcelain"])?.is_empty();
+        let text = String::from_utf8_lossy(&output.stdout);
+        let branch = text
+            .lines()
+            .find_map(|line| line.strip_prefix("# branch.head "))
+            .filter(|value| *value != "(detached)")
+            .map(str::to_owned);
+        let revision = text
+            .lines()
+            .find_map(|line| line.strip_prefix("# branch.oid "))
+            .filter(|value| *value != "(initial)")
+            .map(str::to_owned);
+        let dirty = text
+            .lines()
+            .any(|line| !line.is_empty() && !line.starts_with("# "));
         Ok(GitStatus {
             is_repository: true,
             branch,

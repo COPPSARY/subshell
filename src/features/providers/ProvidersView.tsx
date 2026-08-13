@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Check, KeyRound, Link2, LogOut, Pencil, Plus, Square, Trash2 } from "lucide-react";
+import { errorMessage } from "../../shared/error";
 import { createProvider, detectProviders, getDefaultProvider, listProviders, loginCodex, logoutCodex, reauthenticateProvider, removeProvider, setDefaultProvider, stopCodexLogin, updateProvider } from "./api";
 import type { DetectedProvider, GenericProfile } from "./model";
 import { ProviderIcon } from "./ProviderIcon";
@@ -23,7 +24,23 @@ export function ProvidersView() {
 
   useEffect(() => {
     Promise.all([listProviders(), detectProviders(), getDefaultProvider()])
-      .then(([saved, installed, preferred]) => { setProfiles(saved); setDetected(installed); setDefaultId(preferred); })
+      .then(async ([saved, installed, preferred]) => {
+        const existingCodex = installed.find((provider) => provider.key === "codex" && provider.isAuthenticated);
+        const hasExistingCodexProfile = saved.some((profile) => profile.providerType === "codex" && profile.inheritUserHome);
+        if (existingCodex && !hasExistingCodexProfile) {
+          try {
+            const imported = await createProvider({ id: "", displayName: "Codex", providerType: "codex", status: "active", executablePath: existingCodex.executablePath, arguments: existingCodex.arguments, resumeArguments: existingCodex.resumeArguments, promptMode: existingCodex.promptMode, configRootEnvVar: existingCodex.configRootEnvVar, configSourcePath: null, inheritUserHome: true });
+            saved = [...saved, imported];
+            preferred ??= imported.id;
+            installed = installed.map((provider) => provider.key === "codex" ? { ...provider, isConfigured: true } : provider);
+          } catch (reason) {
+            setError(message(reason));
+          }
+        }
+        setProfiles(saved);
+        setDetected(installed);
+        setDefaultId(preferred);
+      })
       .catch((reason) => setError(message(reason)))
       .finally(() => setLoading(false));
   }, []);
@@ -61,8 +78,8 @@ export function ProvidersView() {
   async function signOut(profile: GenericProfile) { if (!window.confirm(`Sign out ${profile.displayName}? Active runs must be stopped first.`)) return; setError(""); try { const saved = await logoutCodex(profile.id); setProfiles((items) => items.map((item) => item.id === saved.id ? saved : item)); if (profile.id === defaultId) setDefaultId(await getDefaultProvider()); } catch (reason) { setError(message(reason)); } }
   async function useForNewGoals(profile: GenericProfile) { setError(""); try { setDefaultId(await setDefaultProvider(profile.id)); } catch (reason) { setError(message(reason)); } }
   const codex = detected.find((provider) => provider.key === "codex");
-  const codexAccounts = profiles.filter((profile) => profile.providerType === "codex" && !profile.inheritUserHome);
-  const otherProfiles = profiles.filter((profile) => profile.providerType !== "codex" || profile.inheritUserHome);
+  const codexAccounts = profiles.filter((profile) => profile.providerType === "codex");
+  const otherProfiles = profiles.filter((profile) => profile.providerType !== "codex");
   const authLink = authSession?.output.match(/https:\/\/[^\s\x1b]+/)?.[0] ?? null;
   const authCode = authSession?.output.match(/\b[A-Z0-9]{4,6}-[A-Z0-9]{4,6}\b/)?.[0] ?? null;
 
@@ -73,7 +90,7 @@ export function ProvidersView() {
 
     <section aria-labelledby="codex-accounts"><div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2.5"><div><h2 className="table-label" id="codex-accounts">Codex accounts</h2><p className="mt-1 text-[11px] text-tertiary">Use normal ChatGPT sign-in or a device code. Credentials stay in your OS keychain.</p></div><button className="button-primary" disabled={!codex} onClick={() => setLinkFormOpen(true)} type="button"><Link2 size={14} />Link account</button></div>
       {!codex && !loading && <p className="empty-row">Install the Codex CLI first, then return here to link a ChatGPT account.</p>}
-      {codexAccounts.map((profile) => <div className="flex min-h-16 flex-wrap items-center gap-3 border-b border-line px-3 py-2" key={profile.id}><ProviderIcon name="Codex" /><span className="min-w-44 flex-1"><strong className="block text-sm">{profile.displayName}</strong><small className="block text-tertiary">ChatGPT · Separate Codex home</small></span><span className="status-pill">{profile.status === "active" ? profile.id === defaultId ? "Default" : "Linked" : "Needs sign-in"}</span>{profile.status === "active" && profile.id !== defaultId && <button className="button-secondary" onClick={() => useForNewGoals(profile)} type="button">Use for new goals</button>}<button className="button-secondary" disabled={authSession?.active && authSession.accountId === profile.id} onClick={() => startCodexLogin(profile, "browser").catch((reason) => setError(message(reason)))} type="button"><Link2 size={13} />{profile.status === "active" ? "Relink" : "Sign in"}</button><button className="button-secondary" disabled={authSession?.active && authSession.accountId === profile.id} onClick={() => startCodexLogin(profile, "device").catch((reason) => setError(message(reason)))} type="button">Device code</button>{profile.status === "active" && <button aria-label={`Sign out ${profile.displayName}`} className="icon-button" onClick={() => signOut(profile)} type="button"><LogOut size={14} /></button>}<button aria-label={`Remove ${profile.displayName}`} className="icon-button" onClick={() => remove(profile.id)} type="button"><Trash2 size={14} /></button></div>)}
+      {codexAccounts.map((profile) => <div className="flex min-h-16 flex-wrap items-center gap-3 border-b border-line px-3 py-2" key={profile.id}><ProviderIcon name="Codex" /><span className="min-w-44 flex-1"><strong className="block text-sm">{profile.displayName}</strong><small className="block text-tertiary">{profile.inheritUserHome ? "ChatGPT · Existing Codex home" : "ChatGPT · Separate Codex home"}</small></span><span className="status-pill">{profile.status === "active" ? profile.id === defaultId ? "Default" : profile.inheritUserHome ? "Detected" : "Linked" : "Needs sign-in"}</span>{profile.status === "active" && profile.id !== defaultId && <button className="button-secondary" onClick={() => useForNewGoals(profile)} type="button">Use for new goals</button>}{!profile.inheritUserHome && <><button className="button-secondary" disabled={authSession?.active && authSession.accountId === profile.id} onClick={() => startCodexLogin(profile, "browser").catch((reason) => setError(message(reason)))} type="button"><Link2 size={13} />{profile.status === "active" ? "Relink" : "Sign in"}</button><button className="button-secondary" disabled={authSession?.active && authSession.accountId === profile.id} onClick={() => startCodexLogin(profile, "device").catch((reason) => setError(message(reason)))} type="button">Device code</button>{profile.status === "active" && <button aria-label={`Sign out ${profile.displayName}`} className="icon-button" onClick={() => signOut(profile)} type="button"><LogOut size={14} /></button>}</>}<button aria-label={`Remove ${profile.displayName}`} className="icon-button" onClick={() => remove(profile.id)} type="button"><Trash2 size={14} /></button></div>)}
       {codex && !codexAccounts.length && !linkFormOpen && <p className="empty-row">No Codex accounts linked yet. Add one for each ChatGPT email you want to use.</p>}
     </section>
 
@@ -82,7 +99,7 @@ export function ProvidersView() {
     {authSession && <section className="mt-4 border-y border-line px-3 py-4" aria-label={`Sign in ${authSession.accountName}`}><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-sm font-medium">{authSession.active ? authSession.method === "device" ? "Enter the code in ChatGPT" : "Finish signing in with ChatGPT" : "Sign-in finished"}</h2><p className="mt-1 text-xs text-tertiary">{authSession.method === "device" ? `Link ${authSession.accountName} with the one-time code below.` : `Complete the browser sign-in for ${authSession.accountName}.`} SubShell verifies it automatically.</p></div><span className="status-pill">{authSession.active ? "Waiting" : "Finished"}</span></div><div className="mt-3 flex flex-wrap items-center gap-2">{authCode && <code className="select-all rounded border border-line-strong bg-app px-3 py-2 font-mono text-sm font-semibold tracking-widest text-primary">{authCode}</code>}{authLink && <a className="button-primary" href={authLink} rel="noreferrer" target="_blank">Continue to ChatGPT</a>}{authSession.active && <button className="button-secondary" onClick={() => stopCodexLogin(authSession.accountId).catch((reason) => setError(message(reason)))} type="button"><Square size={12} />Cancel</button>}</div><details className="mt-3 text-xs text-tertiary"><summary className="w-fit cursor-pointer select-none hover:text-secondary">Sign-in details</summary><pre aria-live="polite" className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-tertiary" role="log">{authSession.output}</pre></details></section>}
 
     <section aria-labelledby="detected-agents"><h2 className="table-label border-b border-line px-3 py-2.5" id="detected-agents">Detected on this computer</h2>
-      {loading ? <p className="empty-row" role="status">Looking for installed agents…</p> : detected.length ? detected.map((provider) => <div className="flex min-h-16 items-center gap-3 border-b border-line px-3" key={provider.key}><span className="icon-box"><ProviderIcon name={provider.displayName} /></span><span className="min-w-0 flex-1"><strong className="block text-sm font-medium">{provider.displayName}</strong><small className="block truncate font-mono text-[11px] text-tertiary">{provider.executablePath}</small></span>{provider.key === "codex" ? <span className="text-xs text-secondary">Link accounts above</span> : provider.isConfigured ? <span className="flex items-center gap-1.5 text-xs text-secondary"><Check aria-hidden="true" size={14} />Ready</span> : <button className="button-primary" onClick={() => useDetected(provider)} type="button">Configure</button>}</div>) : <p className="empty-row">No supported CLI was found. Install Claude Code, Codex, Kiro, or Gemini, or choose Custom CLI.</p>}
+      {loading ? <p className="empty-row" role="status">Looking for installed agents…</p> : detected.length ? detected.map((provider) => <div className="flex min-h-16 items-center gap-3 border-b border-line px-3" key={provider.key}><span className="icon-box"><ProviderIcon name={provider.displayName} /></span><span className="min-w-0 flex-1"><strong className="block text-sm font-medium">{provider.displayName}</strong><small className="block truncate font-mono text-[11px] text-tertiary">{provider.executablePath}</small></span>{provider.key === "codex" ? <span className="text-xs text-secondary">{provider.isAuthenticated ? "Existing login detected" : "Link accounts above"}</span> : provider.isConfigured ? <span className="flex items-center gap-1.5 text-xs text-secondary"><Check aria-hidden="true" size={14} />Ready</span> : <button className="button-primary" onClick={() => useDetected(provider)} type="button">Configure</button>}</div>) : <p className="empty-row">No supported CLI was found. Install Claude Code, Codex, Kiro, or Gemini, or choose Custom CLI.</p>}
     </section>
 
     {otherProfiles.length > 0 && <section className="mt-6" aria-labelledby="configured-agents"><h2 className="table-label border-b border-line px-3 py-2.5" id="configured-agents">Other CLI profiles</h2>{otherProfiles.map((profile) => <div className="flex min-h-16 flex-wrap items-center gap-3 border-b border-line px-3 py-2" key={profile.id}><ProviderIcon name={profile.displayName} /><span className="min-w-0 flex-1"><strong className="block text-sm">{profile.displayName}</strong><small className="block truncate text-tertiary">{profile.inheritUserHome ? "Using existing CLI login" : "Isolated configuration"}</small></span><span className="status-pill">{profile.status === "needs_reauth" ? "Needs reauth" : profile.status === "revoked" ? "Revoked" : profile.id === defaultId ? "Default" : "Ready"}</span>{profile.status === "active" && profile.id !== defaultId && <button className="button-secondary" onClick={() => useForNewGoals(profile)} type="button">Use for new goals</button>}<button className="icon-button" aria-label={`Update credential for ${profile.displayName}`} onClick={() => { setCredentialFor(profile); setCredential(""); }} type="button"><KeyRound size={14} /></button><button className="icon-button" aria-label={`Edit ${profile.displayName}`} onClick={() => setDraft(profile)} type="button"><Pencil size={14} /></button><button className="icon-button" aria-label={`Remove ${profile.displayName}`} onClick={() => remove(profile.id)} type="button"><Trash2 size={14} /></button></div>)}</section>}
@@ -102,5 +119,5 @@ export function ProvidersView() {
   </div>;
 }
 
-function message(error: unknown) { if (typeof error === "string") return error; if (error && typeof error === "object" && "message" in error) return String(error.message); return "The provider could not be configured."; }
+function message(error: unknown) { return errorMessage(error, "The provider could not be configured."); }
 function cleanTerminalOutput(value: string) { return value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ""); }
